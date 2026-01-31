@@ -24,7 +24,7 @@ from simulation_engine import SimulationEngine
 from constants import * # 導入所有常數
 from recipe_manager import RecipeManager
 from video_generator import VideoGenerator
-# from HeatmapVideoGenerator import HeatmapVideoGenerator
+from etchingamount_generator import EtchingAmountGenerator
 
 class WaterColumn:
     def __init__(self, ax, flow_rate_ml_per_min):
@@ -229,6 +229,7 @@ class SimulationApp:
         report_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), padx=5, pady=5)
         ttk.Button(report_frame, text="Simulation Report", command=self.export_simulation_report).pack(side="left", padx=5)
         ttk.Button(report_frame, text="Accumulation Heatmap", command=self.export_accumulation_heatmap).pack(side="left", padx=5)
+        ttk.Button(report_frame, text="Etching Amount", command=self.export_etching_amount).pack(side="left", padx=5)
         # 連結到外部Video_generator
         ttk.Button(report_frame, text="Generate Video", command=self.export_simulation_video).pack(side="left", padx=5)
 
@@ -427,19 +428,20 @@ class SimulationApp:
         # 1. 解析 Recipe
         parsed_recipe = self.parse_and_prepare_recipe()
         if not parsed_recipe:
-            # 可以考慮在此處加入一個 messagebox 提示使用者解析失敗
-            # messagebox.showwarning("Warning", "Failed to parse or prepare recipe.")
             return
 
         # 2. 選擇檔案路徑
-        filepath = filedialog.asksaveasfilename(
+        user_path = filedialog.asksaveasfilename(
             defaultextension=".mp4",
             filetypes=[("MP4 Video Files", "*.mp4"), ("All Files", "*.*")],
             title="Export Simulation Video As..."
         )
-        if not filepath:
-            # messagebox.showinfo("Info", "Video export cancelled.")
+        if not user_path:
             return
+
+        # 套用命名規範
+        base_path, ext = os.path.splitext(user_path)
+        filepath = f"{base_path}_Simulation_Video{ext}"
 
         # 3. 建立進度視窗
         progress_window = tk.Toplevel(self.root)
@@ -450,10 +452,8 @@ class SimulationApp:
         progress_window.resizable(False, False)
         ttk.Label(progress_window, text="Generating simulation video, please wait...", padding=10).pack()
 
-        # 計算總時長用於進度條 (這部分似乎是為機械動作準備的)
         total_duration = sum(p['total_duration'] for p in parsed_recipe['processes'])
-        if total_duration == 0:
-            total_duration = 1
+        if total_duration == 0: total_duration = 1
 
         progress_label = ttk.Label(progress_window, text=f"Processing Time: 0.0s / {total_duration:.1f}s (0%)", padding=(0, 5))
         progress_label.pack()
@@ -462,33 +462,23 @@ class SimulationApp:
         progress_widgets = {'window': progress_window, 'bar': progress_bar, 'label': progress_label}
 
         try:
-            # 讀取當前播放倍率 (如果視窗未開啟則預設 1.0)
             try:
                 current_multiplier = float(self.speed_var.get().replace('x', ''))
             except (AttributeError, ValueError):
                 current_multiplier = 1.0
 
-            # 直接執行 Simulator 動畫影片生成
             self.video_generator._run_headless_video_generation(
                 parsed_recipe, filepath, progress_widgets, play_speed_multiplier=current_multiplier
             )
-
             messagebox.showinfo("Success", f"Simulation video exported successfully to:\n{filepath}")
         except Exception as e:
             messagebox.showerror("Error", f"An error occurred during video generation: {e}")
         finally:
-            # 確保進度視窗在任何情況下都被關閉
             if progress_window.winfo_exists():
                 progress_window.destroy()
 
     def export_simulation_report(self):
-        """
-        導出報表邏輯優化：
-        1. 實作 Atomic Lock 確保不會重複觸發。
-        2. 確保在計算過程中禁用 UI 相關回調。
-        """
         if getattr(self, '_report_export_lock', False):
-            print("Report export already in progress. Ignoring duplicate request.")
             return
         self._report_export_lock = True
         
@@ -498,30 +488,28 @@ class SimulationApp:
                 self._report_export_lock = False
                 return
 
-            filepath = filedialog.asksaveasfilename(
+            user_path = filedialog.asksaveasfilename(
                 defaultextension=".csv",
                 filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")],
                 title="Export Simulation Report As..."
             )
-            if not filepath:
+            if not user_path:
                 self._report_export_lock = False
                 return
 
-            # --- 自動計算建議的 REPORT_FPS ---
+            # 套用命名規範
+            base_path, ext = os.path.splitext(user_path)
+            filepath = f"{base_path}_Simulation_Report{ext}"
+
             max_rpm = 0
             for proc in parsed_recipe['processes']:
                 spin = proc['spin_params']
-                if spin['mode'] == 'Simple':
-                    current_max = spin['rpm']
-                else:
-                    current_max = max(spin['start_rpm'], spin['end_rpm'])
+                current_max = spin['rpm'] if spin['mode'] == 'Simple' else max(spin['start_rpm'], spin['end_rpm'])
                 if current_max > max_rpm: max_rpm = current_max
             
-            # 提高採樣率限制，確保 1000rpm 以上仍然精確
             suggested_fps = max(800, int(max_rpm * 4))
             parsed_recipe['dynamic_report_fps'] = suggested_fps
 
-            # 3. 建立進度視窗
             progress_window = tk.Toplevel(self.root)
             progress_window.title("Generating Report")
             progress_window.geometry("400x120")
@@ -539,33 +527,28 @@ class SimulationApp:
             progress_bar.pack(pady=10)
             progress_widgets = {'window': progress_window, 'bar': progress_bar, 'label': progress_label}
             
-            # --- 核心模擬導出 ---
             report_data, particle_data, _ = self._run_headless_simulation(parsed_recipe, progress_widgets)
             
-            # 關閉進度視窗
             if progress_window.winfo_exists():
                 progress_window.destroy()
             
-            # --- 檔案寫入 ---
             if report_data:
                 try:
                     with open(filepath, 'w', newline='', encoding='utf-8') as csvfile:
-                        if report_data:
-                            writer = csv.DictWriter(csvfile, fieldnames=report_data[0].keys())
-                            writer.writeheader()
-                            writer.writerows(report_data)
+                        writer = csv.DictWriter(csvfile, fieldnames=report_data[0].keys())
+                        writer.writeheader()
+                        writer.writerows(report_data)
                     messagebox.showinfo("Success", f"Simulation report exported successfully to:\n{filepath}")
                 except Exception as e:
                     messagebox.showerror("Export Error", f"Failed to write simulation report to file: {e}")
                     
             if particle_data:
-                base_path, _ = os.path.splitext(filepath)
+                # 這裡的 base_path 是 user_path 的 base，不包含 _Simulation_Report
                 particle_filepath = f"{base_path}_Particle_Calculation.csv"
-                
                 processed_particle_data = []
                 for p in particle_data:
                     if p['time_on_wafer'] > 0:
-                        avg_velocity = (p['path_length'] / p['time_on_wafer']) if p['time_on_wafer'] > 0 else 0
+                        avg_velocity = (p['path_length'] / p['time_on_wafer'])
                         processed_particle_data.append({
                             'Particle ID': p['id'],
                             'Residence Time (s)': f"{p['time_on_wafer']:.4f}",
@@ -589,16 +572,75 @@ class SimulationApp:
             if 'progress_window' in locals() and progress_window.winfo_exists():
                 progress_window.destroy()
         finally:
-            # 確保在結束前重置標記
             self._report_export_lock = False
 
+    def export_etching_amount(self):
+        if getattr(self, '_etching_export_lock', False):
+            return
+        self._etching_export_lock = True
+
+        try:
+            parsed_recipe = self.parse_and_prepare_recipe()
+            if not parsed_recipe:
+                self._etching_export_lock = False
+                return
+
+            user_path = filedialog.asksaveasfilename(
+                defaultextension=".png",
+                filetypes=[("PNG Files", "*.png"), ("All Files", "*.*")],
+                title="Export Etching Amount Distribution As..."
+            )
+            if not user_path:
+                self._etching_export_lock = False
+                return
+
+            # 套用命名規範
+            base_path, ext = os.path.splitext(user_path)
+            filepath = f"{base_path}_Etching_Amount{ext}"
+
+            max_rpm = 0
+            for proc in parsed_recipe['processes']:
+                spin = proc['spin_params']
+                current_max = spin['rpm'] if spin['mode'] == 'Simple' else max(spin['start_rpm'], spin['end_rpm'])
+                if current_max > max_rpm: max_rpm = current_max
+            
+            suggested_fps = max(800, int(max_rpm * 4))
+            parsed_recipe['dynamic_report_fps'] = suggested_fps
+
+            progress_window = tk.Toplevel(self.root)
+            progress_window.title("Generating Etching Amount")
+            progress_window.geometry("400x120")
+            progress_window.transient(self.root)
+            progress_window.grab_set()
+            progress_window.resizable(False, False)
+            ttk.Label(progress_window, text="Generating etching amount distribution, please wait...", padding=10).pack()
+
+            total_duration = sum(p['total_duration'] for p in parsed_recipe['processes'])
+            if total_duration <= 0: total_duration = 1.0
+            
+            progress_label = ttk.Label(progress_window, text=f"Processing: 0.0s / {total_duration:.1f}s (0%)", padding=(0, 5))
+            progress_label.pack()
+            progress_bar = ttk.Progressbar(progress_window, orient="horizontal", length=350, mode="determinate", maximum=total_duration)
+            progress_bar.pack(pady=10)
+            progress_widgets = {'window': progress_window, 'bar': progress_bar, 'label': progress_label}
+
+            generator = EtchingAmountGenerator(self)
+            success = generator.generate(parsed_recipe, filepath, progress_widgets)
+
+            if progress_window.winfo_exists():
+                progress_window.destroy()
+
+            if success:
+                messagebox.showinfo("Success", f"Etching Amount PNG and Raw Data CSV exported successfully.")
+
+        except Exception as e:
+            messagebox.showerror("Etching Error", f"Failed during etching amount generation: {e}")
+            if 'progress_window' in locals() and progress_window.winfo_exists():
+                progress_window.destroy()
+        finally:
+            self._etching_export_lock = False
+
     def export_accumulation_heatmap(self):
-        """
-        獨立導出熱力圖功能：
-        1. 執行模擬獲得 heatmap_matrix。
-        2. 輸出 PNG 圖片。
-        3. 輸出原始數據 CSV 檔案。
-        """
         if getattr(self, '_heatmap_export_lock', False):
             return
         self._heatmap_export_lock = True
@@ -609,29 +651,28 @@ class SimulationApp:
                 self._heatmap_export_lock = False
                 return
 
-            filepath = filedialog.asksaveasfilename(
+            user_path = filedialog.asksaveasfilename(
                 defaultextension=".png",
                 filetypes=[("PNG Files", "*.png"), ("All Files", "*.*")],
                 title="Export Accumulation Heatmap As..."
             )
-            if not filepath:
+            if not user_path:
                 self._heatmap_export_lock = False
                 return
 
-            # --- 自動計算建議的 REPORT_FPS ---
+            # 套用命名規範
+            base_path, ext = os.path.splitext(user_path)
+            filepath = f"{base_path}_Accumulation_Heatmap{ext}"
+
             max_rpm = 0
             for proc in parsed_recipe['processes']:
                 spin = proc['spin_params']
-                if spin['mode'] == 'Simple':
-                    current_max = spin['rpm']
-                else:
-                    current_max = max(spin['start_rpm'], spin['end_rpm'])
+                current_max = spin['rpm'] if spin['mode'] == 'Simple' else max(spin['start_rpm'], spin['end_rpm'])
                 if current_max > max_rpm: max_rpm = current_max
             
             suggested_fps = max(800, int(max_rpm * 4))
             parsed_recipe['dynamic_report_fps'] = suggested_fps
 
-            # 建立進度視窗
             progress_window = tk.Toplevel(self.root)
             progress_window.title("Generating Heatmap")
             progress_window.geometry("400x120")
@@ -649,28 +690,19 @@ class SimulationApp:
             progress_bar.pack(pady=10)
             progress_widgets = {'window': progress_window, 'bar': progress_bar, 'label': progress_label}
             
-            # --- 核心模擬導出 ---
             _, _, heatmap_matrix = self._run_headless_simulation(parsed_recipe, progress_widgets)
             
-            # 關閉進度視窗
             if progress_window.winfo_exists():
                 progress_window.destroy()
 
             if heatmap_matrix is not None:
-                base_path, _ = os.path.splitext(filepath)
                 heatmap_png_path = filepath
-                heatmap_csv_path = f"{base_path}_RawData.csv"
+                heatmap_csv_path = f"{base_path}_Accumulation_RawData.csv"
                 
-                # 1. 輸出 PNG
-                # 數據轉置以符合 (X, Y) 座標對齊
                 data = heatmap_matrix.T
-        
-                # 強制檢查維度
                 grid_dim = int(np.sqrt(data.size))
-                if data.ndim == 1:
-                    data = data.reshape((grid_dim, grid_dim))
+                if data.ndim == 1: data = data.reshape((grid_dim, grid_dim))
                     
-                # 計算統計數據
                 if data.size > 0:
                     h_max = np.max(data)
                     h_median = np.median(data[data > 0]) if np.any(data > 0) else 0.0
@@ -678,48 +710,38 @@ class SimulationApp:
                 else:
                     h_max = h_median = h_std = 0.0
 
-                # 開始繪圖
                 plt.figure(figsize=(11, 9), dpi=120)
-                im = plt.imshow(
-                    data,
-                    origin='lower',
-                    extent=[-150, 150, -150, 150],
-                    cmap='magma',
-                    interpolation='nearest'
-                )
-
+                im = plt.imshow(data, origin='lower', extent=[-150, 150, -150, 150], cmap='magma', interpolation='nearest')
                 cbar = plt.colorbar(im, fraction=0.046, pad=0.04)
                 cbar.set_label('Accumulated Residence Time (Seconds)')
-
                 wafer_circle = plt.Circle((0, 0), 150, color='white', fill=False, linestyle='--', alpha=0.5)
                 plt.gca().add_artist(wafer_circle)
-
                 plt.title("Wafer Water Accumulation Heatmap (Quantitative)", fontsize=14, pad=15)
                 plt.xlabel("X Position (mm)")
                 plt.ylabel("Y Position (mm)")
                 
-                stats_text = (
-                    f"Max Time:    {h_max:.4f} s\n"
-                    f"Median(>0):  {h_median:.4f} s\n"
-                    f"Std Dev:     {h_std:.4f}\n"
-                    f"Resolution:  1.0 mm/pixel"
-                )
-                plt.text(-145, -145, stats_text, color='white', fontsize=10,
-                        family='monospace', fontweight='bold',
+                stats_text = (f"Max Time:    {h_max:.4f} s\n"
+                            f"Median(>0):  {h_median:.4f} s\n"
+                            f"Std Dev:     {h_std:.4f}\n"
+                            f"Resolution:  1.0 mm/pixel")
+                plt.text(-145, -145, stats_text, color='white', fontsize=10, family='monospace', fontweight='bold',
                         bbox=dict(facecolor='black', alpha=0.6, edgecolor='none'))
 
                 plt.tight_layout()
                 plt.savefig(heatmap_png_path, bbox_inches='tight', dpi=300)
                 plt.close()
 
-                # 2. 輸出 CSV (原始數據)
                 try:
                     np.savetxt(heatmap_csv_path, data, delimiter=",", fmt='%.6f', 
                                header="Raw Accumulation Data (Seconds), Resolution: 1.0mm/pixel, Range: -150 to 150 mm")
                 except Exception as e:
                     messagebox.showerror("Export Error", f"Failed to write heatmap raw data to CSV: {e}")
                 
-                messagebox.showinfo("Success", f"Heatmap PNG and Raw Data CSV exported successfully:\n{heatmap_png_path}\n{heatmap_csv_path}")
+                # 3. 輸出徑向分佈圖 (Radial Distribution)
+                radial_png_path = f"{base_path}_Accumulation_Radial_Distribution.png"
+                self._export_accumulation_radial_distribution(heatmap_matrix, radial_png_path)
+                
+                messagebox.showinfo("Success", f"Heatmap PNG, Radial Plot and Raw Data CSV exported successfully:\n{heatmap_png_path}\n{radial_png_path}\n{heatmap_csv_path}")
 
         except Exception as e:
             messagebox.showerror("Heatmap Error", f"Failed during heatmap generation phase: {e}")
@@ -728,23 +750,66 @@ class SimulationApp:
         finally:
             self._heatmap_export_lock = False
 
-    def export_nozzle_pattern(self):
+    def _export_accumulation_radial_distribution(self, matrix, filepath):
         """
-        處理 UI 流程，並呼叫核心繪製邏輯。
+        計算並輸出隨半徑變化的累積時間分佈圖 (Radial Distribution)
         """
-        parsed_recipe = self.parse_and_prepare_recipe()
-        if not parsed_recipe:
-            return
+        grid_size = matrix.shape[0]
+        center = grid_size / 2.0
+        
+        # 建立坐標網格
+        y, x = np.indices(matrix.shape)
+        r = np.sqrt((x - center + 0.5)**2 + (y - center + 0.5)**2)
+        
+        # 將半徑以 1mm 為單位分組 (0 to 150)
+        r_rounded = r.astype(int)
+        max_r = int(WAFER_RADIUS)
+        
+        radial_sum = np.zeros(max_r + 1)
+        radial_count = np.zeros(max_r + 1)
+        
+        # 向量化累加 (僅考慮晶圓範圍內)
+        mask = r_rounded <= max_r
+        np.add.at(radial_sum, r_rounded[mask], matrix[mask])
+        np.add.at(radial_count, r_rounded[mask], 1)
+        
+        # 計算平均值 (避免除以零)
+        radial_avg = np.divide(radial_sum, radial_count, out=np.zeros_like(radial_sum), where=radial_count > 0)
+        
+        # 繪圖
+        plt.figure(figsize=(10, 6), dpi=100)
+        plt.plot(np.arange(len(radial_avg)), radial_avg, color='red', linewidth=2, label='Average Accumulation')
+        
+        # 填色優化
+        plt.fill_between(np.arange(len(radial_avg)), radial_avg, alpha=0.2, color='red')
+        
+        plt.title("Radial Accumulation Distribution", fontsize=14, pad=15)
+        plt.xlabel("Radius (mm)", fontsize=12)
+        plt.ylabel("Average Accumulation Time (s)", fontsize=12)
+        plt.xlim(0, max_r)
+        plt.xticks(np.arange(0, max_r + 1, 10))
+        plt.ylim(0, np.max(radial_avg) * 1.1 if np.max(radial_avg) > 0 else 1.0)
+        plt.grid(True, linestyle='--', alpha=0.7)
 
-        filepath = filedialog.asksaveasfilename(
+        plt.tight_layout()
+        plt.savefig(filepath, bbox_inches='tight', dpi=300)
+        plt.close()
+
+    def export_nozzle_pattern(self):
+        parsed_recipe = self.parse_and_prepare_recipe()
+        if not parsed_recipe: return
+
+        user_path = filedialog.asksaveasfilename(
             defaultextension=".png",
             filetypes=[("PNG Image", "*.png"), ("All Files", "*.*")],
             title="Export Moving Pattern Image As..."
         )
-        if not filepath:
-            return
+        if not user_path: return
 
-        # 建立進度視窗
+        # 套用命名規範
+        base_path, ext = os.path.splitext(user_path)
+        filepath = f"{base_path}_Moving_Pattern{ext}"
+
         progress_window = tk.Toplevel(self.root)
         progress_window.title("Generating Pattern")
         progress_window.geometry("400x120")
@@ -772,11 +837,6 @@ class SimulationApp:
                 progress_window.destroy()
 
     def _run_headless_pattern_generation(self, recipe, filepath, progress_widgets=None):
-        """
-        運行精簡無頭模擬，追蹤噴嘴軌跡（考慮晶圓旋轉），並繪製成圖。
-        採用 SimulationEngine 以確保物理運算準確。
-        """
-        # 1. 初始化 Matplotlib 繪圖環境
         fig = Figure(figsize=(7, 7), dpi=100)
         ax = fig.add_subplot(111)
         ax.set_aspect('equal', 'box')
@@ -785,7 +845,6 @@ class SimulationApp:
         ax.set_facecolor('#111111')
         ax.add_patch(plt.Circle((0, 0), WAFER_RADIUS, facecolor='#333333', edgecolor='cyan', lw=1.5, zorder=1))
 
-        # 2. 初始化引擎
         headless_arms = {}
         for i in range(1, 4):
             geo = ARM_GEOMETRIES[i]
@@ -793,7 +852,6 @@ class SimulationApp:
 
         engine = SimulationEngine(recipe, headless_arms, {}, headless=True)
 
-        # 軌跡數據列表 (按手臂與線段區分)
         arm_trajectories = {1: [], 2: [], 3: []}
         dt = 1.0 / REPORT_FPS
         total_duration = sum(p['total_duration'] for p in recipe['processes'])
@@ -802,13 +860,8 @@ class SimulationApp:
         last_active_id = None
         last_was_spraying = False
 
-        # 3. 運行狀態機迴圈
-        last_snapshot = None
         while True:
             snapshot = engine.update(dt)
-            last_snapshot = snapshot
-
-            # 更新 UI 進度
             if progress_widgets:
                 try:
                     p_bar, p_label = progress_widgets['bar'], progress_widgets['label']
@@ -821,35 +874,20 @@ class SimulationApp:
             curr_arm_id = snapshot['active_arm_id']
             curr_spraying = snapshot['is_spraying']
 
-            # 只有當正在噴灑時記錄軌跡 (確保不記錄非製程移動)
             if curr_arm_id != 0 and curr_spraying:
-                # 檢查是否需要開始新線段 (手臂更換或噴灑中斷後重新開始)
                 if not last_was_spraying or curr_arm_id != last_active_id:
                     arm_trajectories[curr_arm_id].append([])
-
-                # 1. 取得絕對座標
                 abs_pos = snapshot['nozzle_pos'][:2]
-
-                # 2. 計算反向旋轉矩陣，將噴嘴轉化為晶圓相對座標
                 rad_wafer = math.radians(snapshot['wafer_angle'])
                 cos_a, sin_a = math.cos(-rad_wafer), math.sin(-rad_wafer)
                 inv_rot_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
-
-                # 3. 轉換並儲存至當前手臂的當前線段
                 nozzle_pos_rotated = np.dot(inv_rot_matrix, abs_pos)
                 arm_trajectories[curr_arm_id][-1].append(nozzle_pos_rotated)
 
             last_was_spraying = curr_spraying
             last_active_id = curr_arm_id
+            if snapshot.get('is_finished') or snapshot['time'] > (total_duration + 30.0): break
 
-            # 結束判定
-            if snapshot.get('is_finished'):
-                break
-
-            # 安全鎖
-            if snapshot['time'] > (total_duration + 30.0): break
-
-        # 4. 繪製圖形
         arm_colors = {1: 'lime', 2: 'magenta', 3: 'yellow'}
         has_any_trajectory = False
         for arm_id, segments in arm_trajectories.items():
@@ -857,35 +895,19 @@ class SimulationApp:
                 if segment:
                     has_any_trajectory = True
                     coords = np.array(segment)
-                    # 繪製各手臂專屬顏色的軌跡線
-                    ax.plot(coords[:, 0], coords[:, 1],
-                            color=arm_colors[arm_id],
-                            linewidth=NOZZLE_RADIUS_MM * 2,
-                            solid_capstyle='round',
-                            alpha=0.6,
-                            zorder=10)
+                    ax.plot(coords[:, 0], coords[:, 1], color=arm_colors[arm_id], linewidth=NOZZLE_RADIUS_MM * 2, solid_capstyle='round', alpha=0.6, zorder=10)
 
         if has_any_trajectory:
-            # 繪製噴嘴中心 (最後位置)
-            if last_snapshot is not None:
-                final_pos = last_snapshot['nozzle_pos']
-                ax.plot(final_pos[0], final_pos[1], 'o', color='yellow', markersize=4, zorder=15)
+            final_pos = snapshot['nozzle_pos']
+            ax.plot(final_pos[0], final_pos[1], 'o', color='yellow', markersize=4, zorder=15)
 
-        # 5. 儲存圖片
         fig.savefig(filepath, bbox_inches='tight', dpi=100)
         plt.close(fig)
 
     def _run_headless_simulation(self, recipe, progress_widgets=None):
-        """
-        純數據模擬優化版：
-        1. 徹底解決 ID 偏移與數量遺失。
-        2. 改採「主動紀錄」模式紀錄所有粒子生命週期。
-        """
-        # 1. 初始化 Headless Arms
         headless_arms = {i: DispenseArm(i, geo['pivot'], geo['home'], geo['length'], geo['p_start'], geo['p_end'], None, None) 
                          for i, geo in ARM_GEOMETRIES.items()}
 
-        # 獲取物理參數
         global_water_params = self._get_water_params()
         water_params_dict = {i: {
             'viscosity': global_water_params['viscosity'],
@@ -893,51 +915,35 @@ class SimulationApp:
             'evaporation_rate': global_water_params['evaporation_rate']
         } for i in [1, 2, 3]}
 
-        # 3. 實例化引擎 (傳入 headless=True 防止自動循環)
         engine = SimulationEngine(recipe, headless_arms, water_params_dict, headless=True)
-        engine.next_particle_id = 0 # 強制重置 ID
+        engine.next_particle_id = 0
        
-        # 4. 準備數據容器
         report_data = []
-        # 使用字典追蹤所有出現過的粒子，徹底解決遺失問題
         particle_registry = {} 
-        
-        # 初始化熱力圖
         grid_size = 300
         heatmap_accum = np.zeros((grid_size, grid_size))
        
-        # 5. 設定模擬參數
         report_fps = recipe.get('dynamic_report_fps', REPORT_FPS)
         dt = 1.0 / report_fps
-        report_log_interval = 0.01 # 報表記錄間隔 (s)
+        report_log_interval = 0.01 
         time_since_last_log = 0.0
-       
         total_duration = sum(p['total_duration'] for p in recipe['processes'])
         sim_clock = 0.0
 
         while True:
-            # A. 呼叫引擎更新
             snapshot = engine.update(dt)
             sim_clock += dt
             time_since_last_log += dt
            
-            # B. 主動註冊並更新所有粒子的最新狀態
             for arm_id, particles in engine.particle_systems.items():
                 for p in particles:
                     pid = p['id']
                     if pid not in particle_registry:
-                        # 第一次看見該粒子，建立完整紀錄
-                        particle_registry[pid] = {
-                            'id': pid,
-                            'time_on_wafer': 0.0,
-                            'path_length': 0.0
-                        }
-                    # 只有粒子在晶圓上時才累加統計量
+                        particle_registry[pid] = {'id': pid, 'time_on_wafer': 0.0, 'path_length': 0.0}
                     if p['state'] == 'on_wafer':
                         particle_registry[pid]['time_on_wafer'] = p['time_on_wafer']
                         particle_registry[pid]['path_length'] = p['path_length']
 
-            # C. 熱力圖累積 (計量導向：累積水滴滯留時間)
             rad_wafer = math.radians(snapshot['wafer_angle'])
             cos_t, sin_t = np.cos(-rad_wafer), np.sin(-rad_wafer)
             rot_back = np.array([[cos_t, -sin_t], [sin_t, cos_t]])
@@ -946,30 +952,19 @@ class SimulationApp:
             for particles in engine.particle_systems.values():
                 for p_item in particles:
                     if p_item['state'] == 'on_wafer':
-                        # 取得粒子在晶圓座標系下的位置
-                        center = np.dot(rot_back, p_item['pos'][:2])
-                        active_coords.append(center)
+                        active_coords.append(np.dot(rot_back, p_item['pos'][:2]))
 
             if active_coords:
-                # 每一點代表該位置在 dt 期間內有一個粒子存在，累積滯留時間 dt
-                hist, _, _ = np.histogram2d(
-                    np.array(active_coords)[:,0], 
-                    np.array(active_coords)[:,1], 
-                    bins=grid_size, 
-                    range=[[-150, 150], [-150, 150]]
-                )
+                hist, _, _ = np.histogram2d(np.array(active_coords)[:,0], np.array(active_coords)[:,1], bins=grid_size, range=[[-150, 150], [-150, 150]])
                 heatmap_accum += hist * dt
 
-            # D. 紀錄報表 (每 0.01s 或 到達模擬結束點)
             is_finished = snapshot.get('is_finished', False)
             if time_since_last_log >= report_log_interval or is_finished:
                 time_since_last_log = 0.0
                 if progress_widgets:
                     try:
-                        p_bar = progress_widgets['bar']
-                        p_label = progress_widgets['label']
-                        current_val = min(sim_clock, p_bar['maximum'])
-                        p_bar['value'] = current_val
+                        p_bar, p_label = progress_widgets['bar'], progress_widgets['label']
+                        p_bar['value'] = min(sim_clock, p_bar['maximum'])
                         p_label.config(text=f"Processing Report: {snapshot['time']:.1f}s / (Simulating...)")
                         progress_widgets['window'].update_idletasks()
                     except: pass
@@ -996,175 +991,81 @@ class SimulationApp:
                 row_data.update(radial_counts)
                 report_data.append(row_data)
 
-            # 檢查結束時機 (每影格檢查，但記錄則遵循 0.01s 間隔，確保最後一幀必存)
             if is_finished:
-                # 強制補上最後一幀的數據 (僅當 report_data 不為空且時間點不同時)
                 if not report_data or report_data[-1]['Time Elapsed'] != f"{snapshot['time']:.2f}":
                     report_data.append(row_data)
                 break
-                
-            # 安全鎖
             if snapshot['time'] > (total_duration + 30.0): break
 
-        # 轉換註冊表為報表需要的列表格式
         final_particles_list = list(particle_registry.values())
-
-        # ======= Simulation Summary for Terminal =======
-        print("\n" + "="*60)
-        print(" [Simulation Summary - Headless Mode] ")
-        print("-" * 60)
-       
-        # 1. Particle Statistics
-        total_captured = len(final_particles_list)
-        print(f" ● Total Particles Captured       : {total_captured:,} pts")
-
-        # 2. Process & Time Parameters
-        total_recipe_time = sum(p['total_duration'] for p in recipe['processes'])
-        print(f" ● Simulated Duration             : {sim_clock:.2f} s / {total_recipe_time:.2f} s")
+        print("\n" + "="*60 + "\n [Simulation Summary - Headless Mode] \n" + "-"*60)
+        print(f" ● Total Particles Captured       : {len(final_particles_list):,} pts")
+        print(f" ● Simulated Duration             : {sim_clock:.2f} s / {total_duration:.2f} s")
         print(f" ● Time Step (dt) / Frame Rate    : {dt:.6e} s / {report_fps} FPS")
-
-        # 3. Heatmap Metrics
-        max_heat = np.max(heatmap_accum)
-        median_heat = np.median(heatmap_accum)
-        range_heat = max_heat - np.min(heatmap_accum)
-        std_heat = np.std(heatmap_accum)
-        print(f" ● Heatmap Intensity              : Max={max_heat:.4f}, Median{median_heat:.4f}, Range={range_heat:.4f}, Std={std_heat:.4f}")
-
-        # 4. Data Logging
-        print(f" ● Report Log Entries             : {len(report_data):,} lines")
-       
-        # 5. Status Update
-        print("-" * 60)
-        print(f" Status: Calculation completed")
-        print("="*60 + "\n")
-
+        print(f" ● Heatmap Intensity              : Max={np.max(heatmap_accum):.4f}, Median{np.median(heatmap_accum):.4f}")
+        print(f" ● Report Log Entries             : {len(report_data):,} lines \n" + "-"*60 + "\n Status: Calculation completed \n" + "="*60 + "\n")
         return report_data, final_particles_list, heatmap_accum
 
     def parse_and_prepare_recipe(self):
         try:
-            recipe = {'processes': []}
-            recipe['spin_dir'] = self.spin_dir.get()
-               
-            # 1. 讀取製程參數
+            recipe = {'processes': [], 'spin_dir': self.spin_dir.get()}
             for i, proc_data in enumerate(self.processes_data):
-                # 手臂 ID
                 arm_str = proc_data['arm_var'].get()
                 arm_id = 0 if arm_str == "None" else int(arm_str.split(" ")[1])
-
-                # Flow Rate
                 flow_rate = float(proc_data['flow_rate_var'].get())
-               
-                # 時間與模式
                 duration = float(proc_data['duration_var'].get())
                 if duration <= 0: raise ValueError(f"Process {i+1} total time must be > 0.")
-               
                 start_from_center = proc_data['start_from_center_var'].get()
                 spin_mode = proc_data['spin_mode_var'].get()
-               
-                # 轉速參數打包
                 spin_params = {'mode': spin_mode}
-                if spin_mode == 'Simple':
-                    spin_params['rpm'] = float(proc_data['simple_rpm_var'].get())
+                if spin_mode == 'Simple': spin_params['rpm'] = float(proc_data['simple_rpm_var'].get())
                 else:
                     spin_params['start_rpm'] = float(proc_data['start_rpm_var'].get())
                     spin_params['end_rpm'] = float(proc_data['end_rpm_var'].get())
-               
-                # 3. 讀取步驟 (只讀取原始輸入，不進行物理計算)
                 steps = []
                 if arm_id != 0:
                     last_pos = -float('inf')
                     for j, entry in enumerate(proc_data['step_entries']):
-                        pos = float(entry['pos'].get())
-                        speed = float(entry['speed'].get())
-                       
-                        if not (-120 <= pos <= 120 and 0 <= speed <= 100):
-                            raise ValueError("Parameter out of range.")
-                        if pos < last_pos:
-                            raise ValueError(f"Process {i+1}: Steps must be increasing.")
+                        pos, speed = float(entry['pos'].get()), float(entry['speed'].get())
+                        if not (-120 <= pos <= 120 and 0 <= speed <= 100): raise ValueError("Parameter out of range.")
+                        if pos < last_pos: raise ValueError(f"Process {i+1}: Steps must be increasing.")
                         last_pos = pos
-                       
-                        # 注意：這裡不需要算 vel_percent_s，Engine 會自己算
                         steps.append({'pos': pos, 'speed': speed})
-               
-                recipe['processes'].append({
-                    'arm_id': arm_id,
-                    'flow_rate': flow_rate,
-                    'total_duration': duration,
-                    'spin_params': spin_params,
-                    'start_from_center': start_from_center,
-                    'steps': steps
-                })
-           
+                recipe['processes'].append({'arm_id': arm_id, 'flow_rate': flow_rate, 'total_duration': duration, 'spin_params': spin_params, 'start_from_center': start_from_center, 'steps': steps})
             return recipe
-
         except Exception as e:
             messagebox.showerror("Input Error", f"Error during parsing: {e}")
             return None
 
     def start_or_update_simulation(self):
-        # 0. 防止重複點擊觸發
-        if hasattr(self, '_is_starting_sim') and self._is_starting_sim:
-            return
+        if hasattr(self, '_is_starting_sim') and self._is_starting_sim: return
         self._is_starting_sim = True
-        
-        # 1. 解析並準備 Recipe 數據
         parsed_recipe = self.parse_and_prepare_recipe()
         if not parsed_recipe:
             self._is_starting_sim = False
             return
         self.recipe = parsed_recipe
-
-        # 2. 徹底清理舊動畫與引擎
         if hasattr(self, 'ani') and self.ani:
             try:
-                if self.ani.event_source:
-                    self.ani.event_source.stop()
-            except:
-                pass
-            finally:
-                self.ani = None
-
-        # 3. 獲取物理參數並打包
+                if self.ani.event_source: self.ani.event_source.stop()
+            except: pass
+            finally: self.ani = None
         global_water_params = self._get_water_params()
-        water_params_dict = {arm_id: {
-            'viscosity': global_water_params['viscosity'],
-            'surface_tension': global_water_params['surface_tension'],
-            'evaporation_rate': global_water_params['evaporation_rate']
-        } for arm_id in [1, 2, 3]}
-
-        # 4. 建立 (或重啟) 模擬視窗
+        water_params_dict = {arm_id: {'viscosity': global_water_params['viscosity'], 'surface_tension': global_water_params['surface_tension'], 'evaporation_rate': global_water_params['evaporation_rate']} for arm_id in [1, 2, 3]}
         self.display_water_var.set(True)
-        if not self.sim_window or not self.sim_window.winfo_exists():
-            self.create_simulator_window()
-
-        # 5. 建立 SimulationEngine
+        if not self.sim_window or not self.sim_window.winfo_exists(): self.create_simulator_window()
         self.engine = SimulationEngine(self.recipe, self.arms, water_params_dict)
-
-        # 6. 【動態步長系統初始化】
         self.is_paused = False
         self.speed_var.set("1x")
         self.pause_button.config(text="Pause")
-        
-        # 根據 constants.py 設定基礎步長，確保模擬速度與 FPS 掛鉤
         self.fixed_dt = 1.0 / FPS 
-        # 移除舊有的慢速累積器，改用動態 dt 實現絲滑動畫
-       
-        # 7. 啟動動畫
         self.run_animation()
         self._is_starting_sim = False
 
     def prepare_water_params_from_ui(self):
-        """
-        輔助函式：如果您有專門的 UI 變數，可以在這裡統一打包
-        """
         params_dict = {}
         for arm_id in self.arms.keys():
-            # 範例：從您的 Tkinter 變數中讀取
-            params_dict[arm_id] = {
-                'viscosity': float(self.viscosity_entries[arm_id].get()),
-                'surface_tension': float(self.tension_entries[arm_id].get()),
-                'flow_rate': float(self.flow_entries[arm_id].get())
-            }
+            params_dict[arm_id] = {'viscosity': float(self.viscosity_entries[arm_id].get()), 'surface_tension': float(self.tension_entries[arm_id].get()), 'flow_rate': float(self.flow_entries[arm_id].get())}
         return params_dict
 
     def _create_dummy_artists(self):
@@ -1179,31 +1080,19 @@ class SimulationApp:
             self.arms[i] = DispenseArm(i, geo['pivot'], geo['home'], geo['length'], geo['p_start'], geo['p_end'], arm_line, nozzle_head)
 
     def _on_simulator_close(self):
-        """Handle simulator window closure safely."""
         self.ani_running = False
-        
-        # 立即停止動畫事件源
         try:
             if hasattr(self, 'ani') and self.ani:
-                if self.ani.event_source:
-                    self.ani.event_source.stop()
-                # 移除對動畫對象的引用，幫助 GC
+                if self.ani.event_source: self.ani.event_source.stop()
                 self.ani = None
-        except Exception:
-            pass
-            
-        # 使用 root.after 給予 100ms 讓 Matplotlib 執行緒安全退出，避免正在進行的繪圖操作引發崩潰
-        if self.sim_window:
-            self.root.after(100, self._safe_destroy_sim_window)
+        except: pass
+        if self.sim_window: self.root.after(100, self._safe_destroy_sim_window)
 
     def _safe_destroy_sim_window(self):
         if self.sim_window:
-            try:
-                self.sim_window.destroy()
-            except:
-                pass
-            self.sim_window = None
-            self.ani = None
+            try: self.sim_window.destroy()
+            except: pass
+            self.sim_window, self.ani = None, None
 
     def create_simulator_window(self):
         self.sim_window = tk.Toplevel(self.root)
@@ -1217,20 +1106,14 @@ class SimulationApp:
         self.pause_button.pack(side="left", padx=5)
         self.water_toggle_button = ttk.Button(sim_control_frame, text="Hide Water", command=self.toggle_water_display)
         self.water_toggle_button.pack(side="left", padx=5)
-        
-        # --- 速度控制區：改用按鈕遞增方式，徹底避開 OptionMenu 點擊阻塞 ---
         ttk.Label(sim_control_frame, text="Speed:").pack(side="left", padx=(10, 2))
         self.speed_var = tk.StringVar(value="1x")
         self.speed_label = ttk.Label(sim_control_frame, textvariable=self.speed_var, width=5, foreground="blue", font=("Arial", 10, "bold"))
         self.speed_label.pack(side="left")
-        
         ttk.Button(sim_control_frame, text="<<", width=3, command=lambda: self._adjust_speed(-1)).pack(side="left", padx=2)
         ttk.Button(sim_control_frame, text=">>", width=3, command=lambda: self._adjust_speed(1)).pack(side="left", padx=2)
-        
         self.speed_options = ["0.1x", "0.25x", "0.5x", "1x", "1.25x", "1.5x", "2x", "5x", "10x", "20x"]
-        self.speed_idx = 3 # 預設 1x
-        # -------------------------------------------------------------
-        
+        self.speed_idx = 3 
         self.fig = Figure(figsize=(6, 6), dpi=100)
         self.ax = self.fig.add_subplot(111)
         self.canvas = FigureCanvasTkAgg(self.fig, master=self.sim_window)
@@ -1238,362 +1121,107 @@ class SimulationApp:
         self.init_plot()
 
     def toggle_water_display(self):
-        current_state = self.display_water_var.get()
-        
-        self.display_water_var.set(not current_state)
-        if self.display_water_var.get():
-            self.water_toggle_button.config(text="Hide Water")
-        else:
-            self.water_toggle_button.config(text="Show Water")
+        self.display_water_var.set(not self.display_water_var.get())
+        self.water_toggle_button.config(text="Hide Water" if self.display_water_var.get() else "Show Water")
 
     def toggle_pause(self):
         if not self.ani: return
-        if self.is_paused:
-            self.ani.resume()
-            self.pause_button.config(text="Pause")
-        else:
-            self.ani.pause()
-            self.pause_button.config(text="Play")
+        if self.is_paused: self.ani.resume(); self.pause_button.config(text="Pause")
+        else: self.ani.pause(); self.pause_button.config(text="Play")
         self.is_paused = not self.is_paused
 
     def _adjust_speed(self, delta):
-        """點擊按鈕調整速度，非阻塞且安全"""
         self.speed_idx = max(0, min(len(self.speed_options) - 1, self.speed_idx + delta))
-        new_speed = self.speed_options[self.speed_idx]
-        self.speed_var.set(new_speed)
-        # 此處不進行任何重計算，僅修改變數，由 update_anim 順便讀取
+        self.speed_var.set(self.speed_options[self.speed_idx])
 
-    def change_play_speed(self, *args):
-        pass
+    def change_play_speed(self, *args): pass
 
     def init_plot(self):
-        # 1. 清除舊畫布與設定背景
-        self.ax.clear()
-        self.ax.set_aspect('equal', 'box')
-        self.ax.set_facecolor('black')
-        
-        # 使用 Constants 設定邊界
-        self.ax.set_xlim(-CHAMBER_SIZE / 2, CHAMBER_SIZE / 2)
-        self.ax.set_ylim(-CHAMBER_SIZE / 2, CHAMBER_SIZE / 2)
-
-        # 2. 繪製靜態背景 (Chamber, Wafer, Mask)
-        # Chamber 外框
-        self.ax.add_patch(plt.Rectangle(
-            (-CHAMBER_SIZE / 2, -CHAMBER_SIZE / 2), CHAMBER_SIZE, CHAMBER_SIZE,
-            facecolor='none', edgecolor='gray', lw=2
-        ))
-       
-        # Wafer 本體
-        self.ax.add_patch(plt.Circle(
-            (0, 0), WAFER_RADIUS,
-            facecolor='#222222', edgecolor='cyan', lw=1.5, zorder=1
-        ))
-       
-        # Wafer 中心點標記
+        self.ax.clear(); self.ax.set_aspect('equal', 'box'); self.ax.set_facecolor('black')
+        self.ax.set_xlim(-CHAMBER_SIZE / 2, CHAMBER_SIZE / 2); self.ax.set_ylim(-CHAMBER_SIZE / 2, CHAMBER_SIZE / 2)
+        self.ax.add_patch(plt.Rectangle((-CHAMBER_SIZE / 2, -CHAMBER_SIZE / 2), CHAMBER_SIZE, CHAMBER_SIZE, facecolor='none', edgecolor='gray', lw=2))
+        self.ax.add_patch(plt.Circle((0, 0), WAFER_RADIUS, facecolor='#222222', edgecolor='cyan', lw=1.5, zorder=1))
         self.ax.add_patch(plt.Circle((0, 0), 3, color='cyan', zorder=2))
-       
-        # Notch (缺口) - 初始化為原點，稍後由 update_anim 更新位置
-        self.notch_patch = plt.Polygon(
-            [[0, 0], [0, 0], [0, 0]],
-            closed=True, facecolor='black', edgecolor='cyan', lw=1.5, zorder=2
-        )
+        self.notch_patch = plt.Polygon([[0, 0], [0, 0], [0, 0]], closed=True, facecolor='black', edgecolor='cyan', lw=1.5, zorder=2)
         self.ax.add_patch(self.notch_patch)
-       
-        # 圓形遮罩 (Mask) - 遮住晶圓外部區域
-        mask_inner_radius = WAFER_RADIUS + 10
-        mask_outer_radius = CHAMBER_SIZE / 2
-        circular_mask = patches.Wedge(
-            center=(0, 0),
-            r=mask_outer_radius,
-            theta1=0,
-            theta2=360,
-            width=mask_outer_radius - mask_inner_radius,
-            facecolor='black',
-            zorder=11
-        )
-        self.ax.add_patch(circular_mask)
-
-        # 3. 【關鍵修正】初始化手臂與繪圖物件
-        self.arms = {}
-        arm_colors = {1: 'lime', 2: 'magenta', 3: 'yellow'}
-       
+        mask_inner, mask_outer = WAFER_RADIUS + 10, CHAMBER_SIZE / 2
+        self.ax.add_patch(patches.Wedge((0, 0), mask_outer, 0, 360, width=mask_outer - mask_inner, facecolor='black', zorder=11))
+        self.arms = {}; arm_colors = {1: 'lime', 2: 'magenta', 3: 'yellow'}
         for i in range(1, 4):
-            # A. 先建立 Matplotlib 的繪圖物件 (View)
-            # 手臂連桿 (Line2D)
             arm_line, = self.ax.plot([], [], color='gray', lw=4, visible=False, zorder=12)
-            # 噴嘴頭 (Circle)
             nozzle_head = plt.Circle((0, 0), 10, facecolor=arm_colors[i], visible=False, zorder=13)
             self.ax.add_patch(nozzle_head)
-           
-            # B. 建立 DispenseArm 模型並綁定繪圖物件 (Model + View)
             geo = ARM_GEOMETRIES[i]
-            self.arms[i] = DispenseArm(
-                arm_id=i,
-                pivot=geo['pivot'],
-                home=geo['home'],
-                length=geo['length'],
-                p_start=geo['p_start'],
-                p_end=geo['p_end'],
-                # 這裡傳入剛建立的 artist
-                arm_artist=arm_line,
-                nozzle_artist=nozzle_head
-            )
-
-        # 4. 初始化水柱 (Water Columns)
-        self.water_columns = {}
-        
-        for i in range(1, 4):
-            # 這裡建立 WaterColumn (預設流量，實際模擬時會依據 Process 調整)
-            self.water_columns[i] = WaterColumn(self.ax, 500.0)
-
-        # 5. 初始化狀態文字
-        font_properties = {
-            'family': 'serif',
-            'color':  'white',
-            'verticalalignment': 'top',
-            'size': 11
-        } 
-        self.status_text = self.ax.text(
-            0.02, 0.98, '',
-            transform=self.ax.transAxes,
-            fontdict=font_properties,
-            zorder=20
-        )
-       
-        # 回傳空列表 (因為這是初始化，blitting 會由 init_anim 處理)
+            self.arms[i] = DispenseArm(i, geo['pivot'], geo['home'], geo['length'], geo['p_start'], geo['p_end'], arm_line, nozzle_head)
+        self.water_columns = {i: WaterColumn(self.ax, 500.0) for i in range(1, 4)}
+        self.status_text = self.ax.text(0.02, 0.98, '', transform=self.ax.transAxes, fontdict={'family': 'serif', 'color': 'white', 'verticalalignment': 'top', 'size': 11}, zorder=20)
         return []
 
     def run_animation(self):
-        """啟動動畫循環"""
-        # 1. 確保 Figure 存在
-        if not hasattr(self, 'fig') or self.fig is None:
-            print("Error: self.fig is not defined. Ensure create_simulator_window is called.")
-            return
-
-        # 2. 清理舊動畫
+        if not hasattr(self, 'fig') or self.fig is None: return
         if hasattr(self, 'ani') and self.ani:
             try:
-                if self.ani.event_source:
-                    self.ani.event_source.stop()
-                # 斷開與舊畫布的 resize 連結
-                if hasattr(self, 'canvas') and self.canvas:
-                    self.canvas.mpl_disconnect(self.ani._resize_id)
-            except Exception as e:
-                print(f"Animation Cleanup Warning: {e}")
-
-        # 3. 初始化時間與狀態
-        self.last_frame_time = time.time()
-        self.ani_running = True
-        self.is_paused = False
-
-        # 4. 建立新的動畫實例
-        from matplotlib.animation import FuncAnimation
-        # 動畫更新間隔根據 constants.FPS 動態調整 (例如 60fps = 16ms)
-        anim_interval = int(1000 / FPS)
-        
-        self.ani = FuncAnimation(
-            self.fig,
-            self.update_anim,
-            init_func=self.init_anim,
-            interval=anim_interval,
-            blit=False,
-            cache_frame_data=False
-        )
-       
-        # 5. 刷新畫布
-        if hasattr(self, 'canvas'):
-            self.canvas.draw_idle()
+                if self.ani.event_source: self.ani.event_source.stop()
+                if hasattr(self, 'canvas') and self.canvas: self.canvas.mpl_disconnect(self.ani._resize_id)
+            except: pass
+        self.ani_running, self.is_paused = True, False
+        self.ani = animation.FuncAnimation(self.fig, self.update_anim, init_func=self.init_anim, interval=int(1000 / FPS), blit=False, cache_frame_data=False)
+        if hasattr(self, 'canvas'): self.canvas.draw_idle()
 
     def update_anim(self, frame):
-        """每一幀的渲染邏輯 - 採用【動態步長優化系統】"""
-        if not self.ani_running or not hasattr(self, 'engine') or self.engine is None:
-            return []
-            
-        if self.is_paused:
-            return self.get_current_artists()
-
-        # 1. 獲取當前倍率
-        try:
-            multiplier = float(self.speed_var.get().replace('x', ''))
-        except:
-            multiplier = 1.0
-
-        # 2. 動態調整步長與步數 (動態 FPS 核心邏輯)
-        # 目的：在慢速播放時增加模擬精細度(提高模擬FPS)，高速時維持效能平衡
-        
-        if multiplier <= 1.0:
-            # 【慢速/標準模式】：每一幀都更新，但縮小 dt。
-            # 優點：即便在 0.1x 下畫面依然有 60fps (或 FPS 設定值) 的更新率，極其絲滑。
-            # CPU 負擔：與 1x 播放時完全相同。
-            steps_to_run = 1
-            dynamic_dt = self.fixed_dt * multiplier
-        else:
-            # 【高速模式】：為了保持物理模擬的穩定性，限制單步 dt 不過大，改用多步更新。
-            # 例如 5x 播放時，每幀執行 5 步，每步維持 fixed_dt 長度。
-            steps_to_run = int(multiplier)
-            dynamic_dt = self.fixed_dt * (multiplier / steps_to_run)
-
-        # 3. 執行物理步進
+        if not self.ani_running or not hasattr(self, 'engine') or self.engine is None: return []
+        if self.is_paused: return self.get_current_artists()
+        try: multiplier = float(self.speed_var.get().replace('x', ''))
+        except: multiplier = 1.0
+        if multiplier <= 1.0: steps_to_run, dynamic_dt = 1, self.fixed_dt * multiplier
+        else: steps_to_run = int(multiplier); dynamic_dt = self.fixed_dt * (multiplier / steps_to_run)
         snapshot = None
-        for _ in range(steps_to_run):
-            snapshot = self.engine.update(dynamic_dt)
-
-        if snapshot is None:
-            return self.get_current_artists()
-
-        # 4. 更新視覺元件
-
-        # 3. 更新手臂視覺元件
-        active_id = snapshot.get('active_arm_id')
-        nozzle_pos = snapshot.get('nozzle_pos', np.array([0.0, 0.0]))
-        # 【關鍵修正】從引擎讀取是否正在噴水
-        is_spraying = snapshot.get('is_spraying', False)
-
+        for _ in range(steps_to_run): snapshot = self.engine.update(dynamic_dt)
+        if snapshot is None: return self.get_current_artists()
+        active_id, nozzle_pos, is_spraying = snapshot.get('active_arm_id'), snapshot.get('nozzle_pos', np.array([0.0, 0.0])), snapshot.get('is_spraying', False)
         for arm_id, arm in self.arms.items():
-            if arm_id == active_id:
-                # 只有當引擎說 "is_spraying" 為 True 時，才顯示黃色
-                color = 'yellow' if is_spraying else 'gray'
-               
-                arm.update_artists(nozzle_pos, color=color)
-               
-                # 確保可見性 (假設您的 Arm 類別有 line 和 nozzle 屬性)
-                if hasattr(arm, 'line'): arm.line.set_visible(True)
-                if hasattr(arm, 'nozzle'): arm.nozzle.set_visible(True)
-            else:
-                # 非作用中手臂回原點
-                arm.go_home()
-                # 視需求決定是否隱藏
-                # if hasattr(arm, 'line'): arm.line.set_visible(False)
-
-        # 4. 更新水滴視覺元件 (從引擎 snapshot 讀取)
+            if arm_id == active_id: arm.update_artists(nozzle_pos, color='yellow' if is_spraying else 'gray'); arm.arm_line.set_visible(True); arm.nozzle_head.set_visible(True)
+            else: arm.go_home()
         water_render_data = snapshot.get('water_render', {})
         if self.display_water_var.get():
             for arm_id, data in water_render_data.items():
-                if arm_id in self.water_columns:
-                    # 調用 WaterColumn 內的 draw 方法
-                    self.water_columns[arm_id].draw(data.get('falling', []), data.get('on_wafer', []))
+                if arm_id in self.water_columns: self.water_columns[arm_id].draw(data.get('falling', []), data.get('on_wafer', []))
         else:
-            for arm_id in self.water_columns:
-                self.water_columns[arm_id].clear()
-
-        # 5. 更新晶圓旋轉 (修正之前的 water_plote 拼字錯誤)
+            for wc in self.water_columns.values(): wc.clear()
         if hasattr(self, 'wafer_plot'):
-            # 使用 matplotlib.transforms 進行座標變換
-            import matplotlib.transforms as mtransforms
-            trans = mtransforms.Affine2D().rotate_deg(snapshot['wafer_angle']) + self.ax.transData
-            self.wafer_plot.set_transform(trans)
-
-        # 引擎回傳的是計算好的多邊形頂點座標 (3x2 矩陣)
-        notch_coords = snapshot.get('notch_coords')
-        if notch_coords is not None and hasattr(self, 'notch_patch'):
-            self.notch_patch.set_xy(notch_coords)
-       
-        # 6. 更新左上角狀態文字
-        status_text = (f"Time: {snapshot['time']:.2f}s\n"
-                       f"Process: {snapshot['process_idx'] + 1}\n"
-                       f"State: {snapshot['state']}\n"
-                       f"Step: {snapshot['step_str']}\n"
-                       f"Process Time: {snapshot['process_time_str']}\n"
-                       f"RPM: {snapshot['rpm']:.0f}")
-        self.status_text.set_text(status_text)
-
-        # 7. 回傳所有 Artist 進行重繪
-        # 修正：加上 self.
+            self.wafer_plot.set_transform(matplotlib.transforms.Affine2D().rotate_deg(snapshot['wafer_angle']) + self.ax.transData)
+        if snapshot.get('notch_coords') is not None and hasattr(self, 'notch_patch'): self.notch_patch.set_xy(snapshot['notch_coords'])
+        self.status_text.set_text(f"Time: {snapshot['time']:.2f}s\nProcess: {snapshot['process_idx'] + 1}\nState: {snapshot['state']}\nStep: {snapshot['step_str']}\nProcess Time: {snapshot['process_time_str']}\nRPM: {snapshot['rpm']:.0f}")
         return self.get_current_artists()
 
     def init_anim(self):
-        """動畫初始化：清空所有視覺元件的數據"""
-        # 1. 重置手臂
-        for arm in self.arms.values():
-            arm.update_artists(arm.home_pos)
-           
-        # 2. 重置水柱
-        for wc in self.water_columns.values():
-            wc.reset()
-           
-        # 3. 重置晶圓旋轉
-        if hasattr(self, 'wafer_plot'):
-            self.wafer_plot.set_transform(self.ax.transData)
-           
-        # 4. 重置文字
+        for arm in self.arms.values(): arm.update_artists(arm.home_pos)
+        for wc in self.water_columns.values(): wc.reset()
+        if hasattr(self, 'wafer_plot'): self.wafer_plot.set_transform(self.ax.transData)
         self.status_text.set_text("Initializing...")
-       
-        # 回傳初始的 Artist 列表
         return self.get_current_artists()
 
     def get_current_artists(self):
-        """蒐集當前畫面上所有需要重繪的 Artist 物件"""
         artists = []
-       
-        # A. 基礎元件
-        if hasattr(self, 'status_text'):
-            artists.append(self.status_text)
-        if hasattr(self, 'wafer_plot'):
-            artists.append(self.wafer_plot)
-           
-        # B. 手臂元件 (獲取每隻手臂的 line 和 nozzle)
+        if hasattr(self, 'status_text'): artists.append(self.status_text)
+        if hasattr(self, 'wafer_plot'): artists.append(self.wafer_plot)
         for arm in self.arms.values():
-            # 假設您的 DispenseArm.get_artists() 回傳 [self.line, self.nozzle]
-            if hasattr(arm, 'get_artists'):
-                artists.extend(arm.get_artists())
+            if hasattr(arm, 'get_artists'): artists.extend(arm.get_artists())
             else:
-                # 備案：如果沒有 get_artists 方法，直接手動加入
-                if hasattr(arm, 'line'): artists.append(arm.line)
-                if hasattr(arm, 'nozzle'): artists.append(arm.nozzle)
-               
-        # C. 水柱元件 (獲取 falling 和 on_wafer 兩層)
+                if hasattr(arm, 'arm_line'): artists.append(arm.arm_line)
+                if hasattr(arm, 'nozzle_head'): artists.append(arm.nozzle_head)
         for wc in self.water_columns.values():
-            if hasattr(wc, 'artist'):
-                artists.append(wc.artist)
-            if hasattr(wc, 'on_wafer_artist'):
-                artists.append(wc.on_wafer_artist)
-               
+            if hasattr(wc, 'artist'): artists.append(wc.artist)
+            if hasattr(wc, 'on_wafer_artist'): artists.append(wc.on_wafer_artist)
         return artists
 
-    def get_rpm_at_time(self, process, time_in_proc=0):
-        if self.animation_state in [STATE_RUNNING_PROCESS, STATE_MOVING_FROM_CENTER_TO_START, STATE_PAUSE_AT_CENTER]:
-            spin_params = process['spin_params']
-            if spin_params['mode'] == 'Simple': return spin_params['rpm']
-            else:
-                total_dur = process['total_duration']
-                ratio = min(1.0, max(0.0, time_in_proc / total_dur if total_dur > 0 else 1.0))
-                return spin_params['start_rpm'] * (1 - ratio) + spin_params['end_rpm'] * ratio
-        else:
-            time_in_state = self.simulation_time_elapsed - self.transition_start_time
-            active_arm = self.arms.get(self.active_arm_id)
-            if not active_arm:
-                prev_proc_idx = (self.current_process_index - 1 + len(self.recipe['processes'])) % len(self.recipe['processes'])
-                prev_proc = self.recipe['processes'][prev_proc_idx]
-                if prev_proc['arm_id'] != 0:
-                    active_arm = self.arms[prev_proc['arm_id']]
-                else:
-                    return self.transition_start_rpm
-            angle_diff = active_arm._get_angle_diff(self.transition_end_angle, self.transition_start_angle)
-            arc_dist = abs(angle_diff) * active_arm.arm_length
-            target_speed = MAX_NOZZLE_SPEED_MMS * 0.75
-            transition_duration = arc_dist / target_speed if target_speed > 0 else float('inf')
-            ratio = min(1.0, max(0.0, time_in_state / transition_duration if transition_duration > 0 else 1.0))
-            return self.transition_start_rpm * (1 - ratio) + self.transition_end_rpm * ratio
-
     def on_closing(self):
-        # 先停止動畫，防止關閉過程中繼續觸發渲染
         try:
-            if hasattr(self, 'ani') and self.ani and self.ani.event_source:
-                self.ani.event_source.stop()
-        except Exception:
-            pass
-        self.ani = None
-        self.ani_running = False
-        
-        # 關閉模擬視窗 (如果存在)
+            if hasattr(self, 'ani') and self.ani and self.ani.event_source: self.ani.event_source.stop()
+        except: pass
+        self.ani, self.ani_running = None, False
         if self.sim_window and self.sim_window.winfo_exists():
-            try:
-                self.sim_window.destroy()
-            except Exception:
-                pass
+            try: self.sim_window.destroy()
+            except: pass
             self.sim_window = None
-
-        # 銷毀主視窗
         self.root.destroy()
-
-

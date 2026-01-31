@@ -41,6 +41,14 @@ NOZZLE_RADIUS_MM = 2.0            # 噴嘴半徑 (mm)
 NOZZLE_Z_HEIGHT = 15.0            # 噴嘴到晶圓的初始垂直距離 (mm)
 TRANSITION_ARM_SPEED_RATIO = 0.8  # Arm 轉換狀態下的速度比例 (用於乘以 MAX_NOZZLE_SPEED_MMS)
 
+# --- Etching Amount Simulation Constants ---
+ETCHING_TAU = 0.3                 # 老化模型衰減常數 (s)
+GRID_SIZE = 10.0                  # 蝕刻影響半徑 (mm)
+ETCHING_IMPINGEMENT_TIME = 0.01   # 判定為衝擊區的在晶圓時間門檻 (s)
+ETCHING_IMPINGEMENT_BONUS = 2.0   # 衝擊區的強度加成倍數
+ETCHING_GEO_SMOOTHING = 7.0      # 幾何稀釋平滑常數
+ETCHING_SATURATION_THRESHOLD = 0.002 # 每一步長單個像素點的最大蝕刻貢獻飽和值 (配合像素級飽和邏輯)
+
 # --- Timing & Pause ---
 ARM_CHANGE_PAUSE_TIME = 1.0       # Arm 切換之間的停頓時間 (s)
 CENTER_PAUSE_TIME = 0.8           # Arm 抵達晶圓中心後停頓的時間 (s)
@@ -55,26 +63,27 @@ STATE_MOVING_TO_CENTER_ARC = "MOVING_TO_CENTER_ARC"
 STATE_MOVING_FROM_CENTER_TO_START = "MOVING_FROM_CENTER_TO_START"
 
 # --- Arm Geometric Definitions ---
+
 ARM_GEOMETRIES = {
     1: {
         "pivot": np.array([-225.0, -225.0]), 
-        "length": 320.0,
+        "length": 318.198,
         "home": np.array([-200.0, 94.02]),
-        "p_start": np.array([-127.101, 79.657]), 
-        "p_end": np.array([79.657, -127.101])
+        "p_start": np.array([-126.241, 79.231]), 
+        "p_end": np.array([79.231, -126.241])
     },
     2: {
         "pivot": np.array([225.0, -225.0]), 
-        "length": 320.0,
+        "length": 318.198,
         "home": np.array([200.0, 94.02]),
-        "p_start": np.array([127.101, 79.657]), 
-        "p_end": np.array([-79.657, -127.101])
+        "p_start": np.array([126.241, 79.231]), 
+        "p_end": np.array([-79.231, -126.241])
     },
     3: {
         "pivot": np.array([225.0, -225.0]), 
-        "length": 320.0,
+        "length": 318.198,
         "home": np.array([-94.02, -200.0]),
-        "p_start": np.array([-79.657, -127.101]), 
-        "p_end": np.array([127.101, 79.657])
+        "p_start": np.array([-79.231, -126.241]), 
+        "p_end": np.array([126.241, 79.231])
     }
 }

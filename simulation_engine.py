@@ -296,6 +296,7 @@ class SimulationEngine:
                 'id': self.next_particle_id, 
                 'state': 'falling',
                 'life': 1.0,
+                'birth_time': self.simulation_time_elapsed,
                 'time_on_wafer': 0.0,
                 'path_length': 0.0,
                 'pos': np.array([nozzle_pos[0]+off[0], nozzle_pos[1]+off[1], 15.0]),
@@ -408,6 +409,9 @@ class SimulationEngine:
             self.transition_end_angle = self.transition_start_angle
 
     def _pre_calculate_physics(self):
+        """
+        預先計算手臂移動路徑，實現平滑的線性加速/減速。
+        """
         for process in self.recipe['processes']:
             arm_id = process.get('arm_id', 0)
             if not arm_id or arm_id == 0: continue
@@ -415,17 +419,45 @@ class SimulationEngine:
             steps = process.get('steps', [])
             if len(steps) < 2: continue
             
-            f_segs = []
-            for j in range(len(steps) - 1):
-                p_i, p_f = float(steps[j]['pos']), float(steps[j+1]['pos'])
-                v_avg = (float(steps[j].get('speed', 50)) / 100.0) * arm.max_percent_speed
-                dist, t_d = p_f - p_i, 1.0
-                if v_avg > 0: t_d = abs(dist) / v_avg
-                f_segs.append({'pi': p_i, 'vi': (v_avg if dist > 0 else -v_avg), 'a': 0.0, 't': max(t_d, 0.01), 'label': f"Step {j+1}->{j+2}"})
-            
-            b_segs = []
-            for s in reversed(f_segs):
-                b_segs.append({'pi': s['pi'] + s['vi']*s['t'], 'vi': -s['vi'], 'a': s['a'], 't': s['t'], 'label': s['label'].replace("->", "<-")})
+            def create_segments(step_list, is_forward=True):
+                segs = []
+                for j in range(len(step_list) - 1):
+                    p_i, p_f = float(step_list[j]['pos']), float(step_list[j+1]['pos'])
+                    v_i_mag = (float(step_list[j].get('speed', 0)) / 100.0) * arm.max_percent_speed
+                    v_f_mag = (float(step_list[j+1].get('speed', 0)) / 100.0) * arm.max_percent_speed
+                    
+                    dist = p_f - p_i
+                    if abs(dist) < 1e-6:
+                        continue
+                    
+                    direction = 1.0 if dist > 0 else -1.0
+                    v_i = v_i_mag * direction
+                    v_f = v_f_mag * direction
+                    
+                    # 計算平均速度以求得時間 (假設線性加速度)
+                    v_avg_mag = (v_i_mag + v_f_mag) / 2.0
+                    # 避免除以零或極慢速導致卡死
+                    if v_avg_mag < 0.1:
+                        v_avg_mag = 0.1
+                    
+                    t_d = abs(dist) / v_avg_mag
+                    accel = (v_f - v_i) / t_d if t_d > 0 else 0
+                    
+                    label_from = j + 1 if is_forward else len(step_list) - j
+                    label_to = j + 2 if is_forward else len(step_list) - j - 1
+                    
+                    segs.append({
+                        'pi': p_i,
+                        'vi': v_i,
+                        'a': accel,
+                        't': max(t_d, 0.01),
+                        'label': f"Step {label_from}->{label_to}"
+                    })
+                return segs
+
+            f_segs = create_segments(steps, is_forward=True)
+            # 乒乓往返：從最後一步回到第一步
+            b_segs = create_segments(steps[::-1], is_forward=False)
             
             all_s = f_segs + b_segs
             process['physics_segments'], process['physics_cycle_time'] = all_s, sum(s['t'] for s in all_s)
@@ -435,7 +467,13 @@ class SimulationEngine:
                 for k, step in enumerate(steps):
                     d = abs(step['pos'] - arm.center_pos_percent)
                     if d < min_d: min_d, sfc_idx = d, k
-                sfc_t = sum(f_segs[m]['t'] for m in range(min(sfc_idx, len(f_segs))))
+                
+                # 計算從第一個 f_seg 開始累計到目標 step 的時間
+                # 注意：這裡假設 start_from_center 是從正向路徑切入
+                sfc_t = 0.0
+                for m in range(min(sfc_idx, len(f_segs))):
+                    sfc_t += f_segs[m]['t']
+                    
             process['sfc_start_time'], process['sfc_target_idx'] = sfc_t, sfc_idx
 
     def _get_render_paths(self, arm_id, dt, rpm, spin_dir):
