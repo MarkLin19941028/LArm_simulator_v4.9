@@ -13,16 +13,6 @@ NOTCH_HALF_WIDTH = 7.5
 # Simulation Report 參數
 REPORT_INTERVAL_MM = 2
 
-# --- Heatmap Physical & Visualization Constants ---
-# [物理飽和限制] 定義網格每秒能吸收的最大有效貢獻時間。
-# 數值 1.2 代表 nozzle 正下方飽和時，每秒貢獻 1.2 秒的有效清洗劑量。
-# EFFICIENCY_CAP = 1.0  
-
-# [Heatmap Quality & Physics Emulation]
-# HEATMAP_SMOOTHING_SIGMA = 1.5
-# HEATMAP_SAMPLE_COUNT = 3
-# HEATMAP_SPREAD_SCALE = 80
-
 # --- Simulation Density Parameters ---
 PARTICLE_MAX_COUNT = 3000         # 調降最大粒子數，顯著減輕 CPU 繪圖負擔
 PARTICLE_SPAWN_MULTIPLIER = 1.0   # 粒子生成速率的乘數
@@ -46,8 +36,15 @@ ETCHING_TAU = 0.3                 # 老化模型衰減常數 (s)
 GRID_SIZE = 10.0                  # 蝕刻影響半徑 (mm)
 ETCHING_IMPINGEMENT_TIME = 0.01   # 判定為衝擊區的在晶圓時間門檻 (s)
 ETCHING_IMPINGEMENT_BONUS = 2.0   # 衝擊區的強度加成倍數
-ETCHING_GEO_SMOOTHING = 7.0      # 幾何稀釋平滑常數
+ETCHING_GEO_SMOOTHING = 7.0      # 幾何釋平滑常數
 ETCHING_SATURATION_THRESHOLD = 0.002 # 每一步長單個像素點的最大蝕刻貢獻飽和值 (配合像素級飽和邏輯)
+
+# --- PRE (Particle Removal Efficiency) Constants ---
+PRE_ALPHA = 0.001               # 剪切項係數
+PRE_BETA = 0.5                    # 衝擊項保底係數
+PRE_GRID_SIZE = 10.0               # 清洗影響半徑 (mm)
+PRE_Q_REF = 1000.0                # 參考流量 (mL/min)
+PRE_GAMMA_BASE = 0.001            # 基礎再附著係數 (1/mm)
 
 # --- Timing & Pause ---
 ARM_CHANGE_PAUSE_TIME = 1.0       # Arm 切換之間的停頓時間 (s)
