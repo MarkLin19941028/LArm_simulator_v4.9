@@ -4,19 +4,19 @@
 
 PARAMETER_DEFINITIONS = {
     "Timing & Speed": {
-        "TRANSITION_ARM_SPEED_RATIO": ("Trans. Speed Ratio", 0.8, 'float', (0.1, 2.0), "Arm 不噴灑移動的速度(相對最快移動速度）"),
+        "TRANSITION_ARM_SPEED_RATIO": ("Trans. Speed Ratio", 0.8, 'float', (0.1, 2.0), "Arm 不噴灑時移動的速度(相對最快速度）"),
         "ARM_CHANGE_PAUSE_TIME":      ("Arm Change Pause (s)", 1.0, 'float', (0.0, 10.0), "Arm 切換之間的停頓時間 (s)"),
         "CENTER_PAUSE_TIME":          ("Center Pause (s)", 0.8, 'float', (0.0, 10.0), "Arm 抵達晶圓中心後停頓的時間 (s)"),
     },
-    "Etching Simulation": {
+    "Etching Amount": {
         "ETCHING_TAU":                ("Decay Tau (s)", 0.3, 'float', (0.01, 100.0), "老化模型衰減常數 (s)"),
         "GRID_SIZE":                  ("Grid Size (mm)", 10.0, 'float', (1.0, 30.0), "蝕刻影響半徑 (mm)"),
         "ETCHING_IMPINGEMENT_TIME":   ("Impingement Time (s)", 0.01, 'float', (0.0, 5.0), "判定為衝擊區的在晶圓時間門檻 (s)"),
         "ETCHING_IMPINGEMENT_BONUS":  ("Impingement Bonus", 2.0, 'float', (1.0, 10.0), "衝擊區的強度加成倍數"),
         "ETCHING_GEO_SMOOTHING":      ("Geo Smoothing", 7.0, 'float', (0.1, 50.0), "幾何釋平滑常數"),
-        "ETCHING_SATURATION_THRESHOLD":("Sat. Threshold", 0.002, 'float', (0.0001, 1.0), "每一步長單個像素點的最大蝕刻貢獻飽和值 (配合像素級飽和邏輯)"),
+        "ETCHING_SATURATION_THRESHOLD":("Sat. Threshold", 0.002, 'float', (0.0001, 1.0), "最大蝕刻貢獻飽和值"),
     },
-    "PRE Simulation": {
+    "Particle Removal": {
         "PRE_ALPHA":                  ("Alpha (Shear)", 0.001, 'float', (0.0, 1.0), "剪切項係數"),
         "PRE_BETA":                   ("Beta (Impact)", 0.5, 'float', (0.0, 10.0), "衝擊項保底係數"),
         "PRE_GRID_SIZE":              ("PRE Grid Size (mm)", 10.0, 'float', (1.0, 30.0), "清洗影響半徑 (mm)"),
