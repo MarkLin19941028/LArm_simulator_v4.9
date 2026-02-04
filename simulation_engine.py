@@ -4,11 +4,17 @@ import random
 from constants import *
 
 class SimulationEngine:
-    def __init__(self, recipe, arms_dict, water_params_dict, headless=False):
+    def __init__(self, recipe, arms_dict, water_params_dict, headless=False, config=None):
         self.recipe = recipe
         self.arms = arms_dict
         self.water_params = water_params_dict
         self.headless = headless # 新增 headless 標記
+        self.config = config if config else {}
+
+        # 從 config 讀取參數，若無則使用 constants.py 的預設值
+        self.transition_arm_speed_ratio = self.config.get('TRANSITION_ARM_SPEED_RATIO', TRANSITION_ARM_SPEED_RATIO)
+        self.arm_change_pause_time = self.config.get('ARM_CHANGE_PAUSE_TIME', ARM_CHANGE_PAUSE_TIME)
+        self.center_pause_time = self.config.get('CENTER_PAUSE_TIME', CENTER_PAUSE_TIME)
         
         self.particle_systems = {arm_id: [] for arm_id in arms_dict.keys()}
         self.next_particle_id = 0
@@ -104,11 +110,11 @@ class SimulationEngine:
                 self._calculate_physics_movement(current_process, arm, dt)
         
         elif self.animation_state == STATE_ARM_CHANGE_PAUSE:
-            if self.simulation_time_elapsed - self.transition_start_time >= ARM_CHANGE_PAUSE_TIME:
+            if self.simulation_time_elapsed - self.transition_start_time >= self.arm_change_pause_time:
                 self._prepare_next_arm_move()
                 
         elif self.animation_state == STATE_PAUSE_AT_CENTER:
-            if self.simulation_time_elapsed - self.transition_start_time >= CENTER_PAUSE_TIME:
+            if self.simulation_time_elapsed - self.transition_start_time >= self.center_pause_time:
                 self._prepare_move_center_to_start(current_process)
                 
         else:
@@ -136,7 +142,7 @@ class SimulationEngine:
                 if arm:
                     angle_diff = arm._get_angle_diff(self.transition_end_angle, self.transition_start_angle)
                     dist_arc = abs(angle_diff) * arm.arm_length
-                    dur = max(0.05, dist_arc / (MAX_NOZZLE_SPEED_MMS * 0.8))
+                    dur = max(0.05, dist_arc / (MAX_NOZZLE_SPEED_MMS * self.transition_arm_speed_ratio))
                     if (self.simulation_time_elapsed - self.transition_start_time) >= dur:
                         is_finished = True
                 else:
@@ -352,7 +358,7 @@ class SimulationEngine:
         
         angle_diff = arm._get_angle_diff(self.transition_end_angle, self.transition_start_angle)
         dist_arc = abs(angle_diff) * arm.arm_length
-        dur = max(0.05, dist_arc / (MAX_NOZZLE_SPEED_MMS * 0.8))
+        dur = max(0.05, dist_arc / (MAX_NOZZLE_SPEED_MMS * self.transition_arm_speed_ratio))
         
         t = self.simulation_time_elapsed - self.transition_start_time
         

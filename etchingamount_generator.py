@@ -15,15 +15,27 @@ from constants import (
 class EtchingAmountGenerator:
     def __init__(self, app_instance):
         self.app = app_instance
-        self.tau = ETCHING_TAU  # Use constant from constants.py
 
-    def generate(self, recipe, filepath, progress_widgets=None):
+    def generate(self, recipe, filepath, config=None, progress_widgets=None):
         """
         核心蝕刻量模擬邏輯：
         1. 採用老化模型加權：contribution = exp(-(t - birth_time) / tau)
         2. 空間分佈：擴散至 NOZZLE_RADIUS_MM 範圍
         3. 輸出 PNG 與 CSV
         """
+        # 合併配置
+        if config is None:
+            from simulation_config_def import get_default_config
+            config = get_default_config()
+
+        # 提取蝕刻參數
+        etch_tau = config.get('ETCHING_TAU', ETCHING_TAU)
+        grid_radius = config.get('GRID_SIZE', GRID_SIZE)
+        imp_time = config.get('ETCHING_IMPINGEMENT_TIME', ETCHING_IMPINGEMENT_TIME)
+        imp_bonus = config.get('ETCHING_IMPINGEMENT_BONUS', ETCHING_IMPINGEMENT_BONUS)
+        geo_smoothing = config.get('ETCHING_GEO_SMOOTHING', ETCHING_GEO_SMOOTHING)
+        sat_threshold = config.get('ETCHING_SATURATION_THRESHOLD', ETCHING_SATURATION_THRESHOLD)
+
         # 1. 初始化 Headless Arms
         headless_arms = {i: DispenseArm(i, geo['pivot'], geo['home'], geo['length'], geo['p_start'], geo['p_end'], None, None) 
                          for i, geo in ARM_GEOMETRIES.items()}
@@ -37,7 +49,7 @@ class EtchingAmountGenerator:
         } for i in [1, 2, 3]}
 
         # 2. 實例化引擎
-        engine = SimulationEngine(recipe, headless_arms, water_params_dict, headless=True)
+        engine = SimulationEngine(recipe, headless_arms, water_params_dict, headless=True, config=config)
         
         # 3. 準備蝕刻矩陣 (1.0mm per pixel)
         grid_size = 300
@@ -84,23 +96,24 @@ class EtchingAmountGenerator:
                         tow = p.get('time_on_wafer', 0.0)
                         
                         # 基本老化模型
-                        base_contribution = math.exp(-age / self.tau) * dt
+                        base_contribution = math.exp(-age / etch_tau) * dt
                         
                         # [修正] 噴嘴衝擊加權：使用 time_on_wafer 判定
-                        if tow < ETCHING_IMPINGEMENT_TIME:
-                            base_contribution *= ETCHING_IMPINGEMENT_BONUS
+                        if tow < imp_time:
+                            base_contribution *= imp_bonus
                             
                         # 3. 空間加權貢獻 (GRID_SIZE)
                         # 將該粒子的貢獻先累加到 temp_step_matrix 中
                         self._apply_etched_contribution(
                             temp_step_matrix, center[0], center[1], 
-                            base_contribution, GRID_SIZE, grid_size
+                            base_contribution, grid_radius, grid_size,
+                            geo_smoothing=geo_smoothing
                         )
 
             # [新增] 整體強度飽和：對整個暫存矩陣執行一次 tanh 運算 (符合物理邏輯：針對像素點的總接收量飽和)
-            if ETCHING_SATURATION_THRESHOLD > 0:
-                temp_step_matrix = ETCHING_SATURATION_THRESHOLD * np.tanh(
-                    temp_step_matrix / ETCHING_SATURATION_THRESHOLD
+            if sat_threshold > 0:
+                temp_step_matrix = sat_threshold * np.tanh(
+                    temp_step_matrix / sat_threshold
                 )
 
             # [新增] 將飽和後的單步貢獻累加進主矩陣
@@ -110,10 +123,10 @@ class EtchingAmountGenerator:
                 break
 
         # 6. 輸出結果
-        self._export_results(etch_matrix, filepath)
+        self._export_results(etch_matrix, filepath, config=config)
         return True
 
-    def _apply_etched_contribution(self, matrix, x, y, contribution, radius, grid_size):
+    def _apply_etched_contribution(self, matrix, x, y, contribution, radius, grid_size, geo_smoothing=7.0):
         """
         將蝕刻貢獻擴散到指定半徑內的像素
         使用圓形分佈、距離加權，並引入幾何稀釋效應 (Geometric Normalization)
@@ -144,13 +157,13 @@ class EtchingAmountGenerator:
                     y_wafer = j - 150
                     r_wafer = math.sqrt(x_wafer**2 + y_wafer**2)
                     
-                    # 引用 ETCHING_GEO_SMOOTHING 常數，防止 r=0 時數值爆炸
-                    geo_factor = (r_wafer + ETCHING_GEO_SMOOTHING) / 150
+                    # 引用幾何平滑常數，防止 r=0 時數值爆炸
+                    geo_factor = (r_wafer + geo_smoothing) / 150
                     
                     # 3. 累加原始強度 (不在此處飽和，改由外部統一處理)
                     matrix[i, j] += contribution * spatial_weight * geo_factor
 
-    def _export_results(self, matrix, filepath):
+    def _export_results(self, matrix, filepath, config=None):
         base_path, _ = os.path.splitext(filepath)
         png_path = filepath
         
@@ -190,12 +203,15 @@ class EtchingAmountGenerator:
         else:
             h_max = h_median = h_std = 0.0
 
+        etch_tau = config.get('ETCHING_TAU', ETCHING_TAU) if config else ETCHING_TAU
+        grid_radius = config.get('GRID_SIZE', GRID_SIZE) if config else GRID_SIZE
+
         stats_text = (
             f"Max Amount:   {h_max:.4f}\n"
             f"Median(>0):   {h_median:.4f}\n"
             f"Std Dev:      {h_std:.4f}\n"
-            f"Aging Tau:    {self.tau}s\n"
-            f"Grid Size:    {GRID_SIZE}mm"
+            f"Aging Tau:    {etch_tau}s\n"
+            f"Grid Size:    {grid_radius}mm"
         )
         plt.text(-145, -145, stats_text, color='white', fontsize=10,
                 family='monospace', fontweight='bold',

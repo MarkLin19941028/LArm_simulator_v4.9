@@ -26,6 +26,7 @@ from recipe_manager import RecipeManager
 from video_generator import VideoGenerator
 from etchingamount_generator import EtchingAmountGenerator
 from PRE_generator import PREGenerator
+from simulation_config_def import PARAMETER_DEFINITIONS, get_default_config
 
 class WaterColumn:
     def __init__(self, ax, flow_rate_ml_per_min):
@@ -92,7 +93,7 @@ class SimulationApp:
         style.configure('TLabelframe.Label', font=labelframe_font)
         # --- 字體設定 END ---
 
-        self.root.geometry("1050x750")
+        self.root.geometry("750x950")
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.ani = None
         self.sim_window = None
@@ -126,6 +127,7 @@ class SimulationApp:
         # --- 初始化管理器 (必須在 create_editor_widgets 之前) ---
         self.recipe_manager = RecipeManager(self)
         self.video_generator = VideoGenerator(self)
+        self.config = get_default_config()
 
         # --- MODIFICATION START: Remove diffusion_var ---
         self.water_setting_mode_var = tk.StringVar(value="Auto")
@@ -203,8 +205,98 @@ class SimulationApp:
         else:  # Auto mode
             self.manual_water_settings_frame.grid_remove()
 
+    def _build_constants_ui(self, parent):
+        """完全動態生成的設定介面"""
+        self.config_vars = {} 
+        
+        # 建立可捲動區域
+        canvas = tk.Canvas(parent)
+        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas, padding=10)
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        row_idx = 0
+        
+        # --- 核心修改：遍歷定義檔生成 UI ---
+        for category, params in PARAMETER_DEFINITIONS.items():
+            # 建立分類外框
+            labelframe = ttk.LabelFrame(scrollable_frame, text=category, padding=10)
+            labelframe.grid(row=row_idx, column=0, sticky="ew", padx=10, pady=5)
+            
+            # 使用 Grid 佈局，每行放兩個參數，下方加上說明文字
+            inner_items = list(params.items())
+            for i, (key, info) in enumerate(inner_items):
+                label_text, default_val, var_type, limit_range, description = info
+                
+                # 計算位置：i=0,1 -> r=0; i=2,3 -> r=2 ... (每組佔用兩行，一行控制項，一行說明)
+                base_r = (i // 2) * 2
+                c = i % 2 # 0 or 1
+                
+                # 1. 建立 Label
+                ttk.Label(labelframe, text=label_text + ":", font=("Segoe UI", 9, "bold")).grid(
+                    row=base_r, column=c*2, sticky="w", padx=(5, 2), pady=(5, 0)
+                )
+                
+                # 2. 建立 Variable
+                var = tk.StringVar(value=str(default_val))
+                self.config_vars[key] = var
+                
+                # 3. 建立 Entry
+                entry = ttk.Entry(labelframe, textvariable=var, width=12)
+                entry.grid(row=base_r, column=c*2+1, sticky="w", padx=(0, 15), pady=(5, 0))
+                
+                # 4. 建立說明文字 (Description) - 放在控制項下一行
+                desc_label = ttk.Label(labelframe, text=description, font=("Segoe UI", 8), foreground="gray", wraplength=200)
+                desc_label.grid(row=base_r + 1, column=c*2, columnspan=2, sticky="nw", padx=(5, 15), pady=(0, 10))
+                
+                # 綁定驗證事件
+                entry.bind('<FocusOut>', lambda e, v=var, r=limit_range, n=label_text: self._validate_range(v, r, n))
+            
+            row_idx += 1
+
+    def _validate_range(self, var, range_tuple, name):
+        """通用的驗證函數"""
+        min_val, max_val = range_tuple
+        try:
+            val = float(var.get())
+            if not (min_val <= val <= max_val):
+                raise ValueError
+        except ValueError:
+            messagebox.showwarning("Invalid Input", f"Value for '{name}' must be between {min_val} and {max_val}.")
+            var.set(str(min_val)) # 重置為最小值
+
+    def get_current_config(self):
+        """獲取當前 UI 中的所有配置"""
+        current_config = {}
+        for key, var in self.config_vars.items():
+            try:
+                current_config[key] = float(var.get())
+            except:
+                # 這裡理論上 _validate_range 會處理，但保險起見加個 fallback
+                current_config[key] = 0.0
+        return current_config
+
     def create_editor_widgets(self):
-        container = ttk.Frame(self.root)
+        # 建立主分頁控制元件
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill="both", expand=True)
+
+        # --- 分頁 1: Process Recipe ---
+        recipe_tab = ttk.Frame(self.notebook)
+        self.notebook.add(recipe_tab, text="Process Recipe")
+
+        # 原本的捲動容器邏輯移到 recipe_tab
+        container = ttk.Frame(recipe_tab)
         container.pack(fill="both", expand=True)
         container.grid_rowconfigure(0, weight=1)
         container.grid_columnconfigure(0, weight=1)
@@ -220,6 +312,12 @@ class SimulationApp:
         self.scrollable_frame.bind("<Configure>", lambda e: main_canvas.configure(scrollregion=main_canvas.bbox("all")))
         content_frame = ttk.Frame(self.scrollable_frame)
         content_frame.pack(fill="both", expand=True)
+
+        # --- 分頁 2: Physics & System ---
+        physics_tab = ttk.Frame(self.notebook)
+        self.notebook.add(physics_tab, text="Physics & System")
+        self._build_constants_ui(physics_tab)
+
         io_frame = ttk.LabelFrame(content_frame, text="Export / Import Recipe", padding="10")
         io_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), padx=5, pady=5)
         # 連結到外部recipe_manager
@@ -228,14 +326,16 @@ class SimulationApp:
 
         report_frame = ttk.LabelFrame(content_frame, text="Reporting", padding="10")
         report_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), padx=5, pady=5)
-        ttk.Button(report_frame, text="Simulation Report", command=self.export_simulation_report).pack(side="left", padx=5)
-        ttk.Button(report_frame, text="Accumulation Heatmap", command=self.export_accumulation_heatmap).pack(side="left", padx=5)
-        ttk.Button(report_frame, text="Etching Amount", command=self.export_etching_amount).pack(side="left", padx=5)
-        ttk.Button(report_frame, text="Particle Removal", command=self.export_pre_efficiency).pack(side="left", padx=5)
-        # 連結到外部Video_generator
-        ttk.Button(report_frame, text="Generate Video", command=self.export_simulation_video).pack(side="left", padx=5)
-
-        ttk.Button(report_frame, text="Moving Pattern", command=self.export_nozzle_pattern).pack(side="left", padx=15)
+        
+        # Row 1
+        ttk.Button(report_frame, text="Simulation Report", command=self.export_simulation_report).grid(row=0, column=0, padx=5, pady=2, sticky="ew")
+        ttk.Button(report_frame, text="Generate Video", command=self.export_simulation_video).grid(row=0, column=1, padx=5, pady=2, sticky="ew")
+        ttk.Button(report_frame, text="Moving Pattern", command=self.export_nozzle_pattern).grid(row=0, column=2, padx=5, pady=2, sticky="ew")
+        
+        # Row 2
+        ttk.Button(report_frame, text="Accumulation Heatmap", command=self.export_accumulation_heatmap).grid(row=1, column=0, padx=5, pady=2, sticky="ew")
+        ttk.Button(report_frame, text="Etching Amount", command=self.export_etching_amount).grid(row=1, column=1, padx=5, pady=2, sticky="ew")
+        ttk.Button(report_frame, text="Particle Removal", command=self.export_pre_efficiency).grid(row=1, column=2, padx=5, pady=2, sticky="ew")
         global_frame = ttk.LabelFrame(content_frame, text="Global Parameters", padding="10")
         global_frame.grid(row=2, column=0, sticky=(tk.W, tk.E), padx=5, pady=5)
         ttk.Label(global_frame, text="Wafer Spin Direction:").grid(row=0, column=0, sticky=tk.W, pady=2)
@@ -469,8 +569,12 @@ class SimulationApp:
             except (AttributeError, ValueError):
                 current_multiplier = 1.0
 
+            current_config = self.get_current_config()
+
             self.video_generator._run_headless_video_generation(
-                parsed_recipe, filepath, progress_widgets, play_speed_multiplier=current_multiplier
+                parsed_recipe, filepath, progress_widgets, 
+                play_speed_multiplier=current_multiplier,
+                config=current_config
             )
             messagebox.showinfo("Success", f"Simulation video exported successfully to:\n{filepath}")
         except Exception as e:
@@ -626,8 +730,9 @@ class SimulationApp:
             progress_bar.pack(pady=10)
             progress_widgets = {'window': progress_window, 'bar': progress_bar, 'label': progress_label}
 
+            current_config = self.get_current_config()
             generator = EtchingAmountGenerator(self)
-            success = generator.generate(parsed_recipe, filepath, progress_widgets)
+            success = generator.generate(parsed_recipe, filepath, config=current_config, progress_widgets=progress_widgets)
 
             if progress_window.winfo_exists():
                 progress_window.destroy()
@@ -692,8 +797,9 @@ class SimulationApp:
             progress_bar.pack(pady=10)
             progress_widgets = {'window': progress_window, 'bar': progress_bar, 'label': progress_label}
 
+            current_config = self.get_current_config()
             generator = PREGenerator(self)
-            success = generator.generate(parsed_recipe, filepath, progress_widgets)
+            success = generator.generate(parsed_recipe, filepath, config=current_config, progress_widgets=progress_widgets)
 
             if progress_window.winfo_exists():
                 progress_window.destroy()
@@ -983,7 +1089,8 @@ class SimulationApp:
             'evaporation_rate': global_water_params['evaporation_rate']
         } for i in [1, 2, 3]}
 
-        engine = SimulationEngine(recipe, headless_arms, water_params_dict, headless=True)
+        current_config = self.get_current_config()
+        engine = SimulationEngine(recipe, headless_arms, water_params_dict, headless=True, config=current_config)
         engine.next_particle_id = 0
        
         report_data = []
@@ -1122,7 +1229,9 @@ class SimulationApp:
         water_params_dict = {arm_id: {'viscosity': global_water_params['viscosity'], 'surface_tension': global_water_params['surface_tension'], 'evaporation_rate': global_water_params['evaporation_rate']} for arm_id in [1, 2, 3]}
         self.display_water_var.set(True)
         if not self.sim_window or not self.sim_window.winfo_exists(): self.create_simulator_window()
-        self.engine = SimulationEngine(self.recipe, self.arms, water_params_dict)
+        
+        current_config = self.get_current_config()
+        self.engine = SimulationEngine(self.recipe, self.arms, water_params_dict, config=current_config)
         self.is_paused = False
         self.speed_var.set("1x")
         self.pause_button.config(text="Pause")

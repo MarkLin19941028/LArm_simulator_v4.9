@@ -13,13 +13,8 @@ from constants import (
 class PREGenerator:
     def __init__(self, app_instance):
         self.app = app_instance
-        self.alpha = PRE_ALPHA
-        self.beta = PRE_BETA
-        self.impact_radius = PRE_GRID_SIZE
-        self.q_ref = PRE_Q_REF
-        self.gamma_base = PRE_GAMMA_BASE
 
-    def generate(self, recipe, filepath, progress_widgets=None):
+    def generate(self, recipe, filepath, config=None, progress_widgets=None):
         """
         Cleaning Dose 模擬邏輯：
         1. 使用結合流量補償與再附著衰減的混合型一階動力學模型
@@ -27,6 +22,18 @@ class PREGenerator:
         3. Dose_eff = sum( [ k * exp(-gamma_eff * r) * dt ] )
         4. 空間分佈：擴散至 PRE_GRID_SIZE 範圍
         """
+        # 合併配置
+        if config is None:
+            from simulation_config_def import get_default_config
+            config = get_default_config()
+
+        # 提取 PRE 參數
+        pre_alpha = config.get('PRE_ALPHA', PRE_ALPHA)
+        pre_beta = config.get('PRE_BETA', PRE_BETA)
+        pre_grid_radius = config.get('PRE_GRID_SIZE', PRE_GRID_SIZE)
+        pre_q_ref = config.get('PRE_Q_REF', PRE_Q_REF)
+        pre_gamma_base = config.get('PRE_GAMMA_BASE', PRE_GAMMA_BASE)
+
         # 1. 初始化 Headless Arms
         headless_arms = {i: DispenseArm(i, geo['pivot'], geo['home'], geo['length'], geo['p_start'], geo['p_end'], None, None) 
                          for i, geo in ARM_GEOMETRIES.items()}
@@ -40,7 +47,7 @@ class PREGenerator:
         } for i in [1, 2, 3]}
 
         # 2. 實例化引擎
-        engine = SimulationEngine(recipe, headless_arms, water_params_dict, headless=True)
+        engine = SimulationEngine(recipe, headless_arms, water_params_dict, headless=True, config=config)
         
         # 3. 準備 Dose 矩陣 (1.0mm per pixel)
         grid_size = 300
@@ -69,11 +76,11 @@ class PREGenerator:
 
             # 流量與補償係數計算
             current_proc = recipe['processes'][snapshot['process_idx']]
-            q_actual = current_proc.get('flow_rate', self.q_ref)
-            flow_ratio = q_actual / self.q_ref
+            q_actual = current_proc.get('flow_rate', pre_q_ref)
+            flow_ratio = q_actual / pre_q_ref
             c_q = math.sqrt(flow_ratio) # 衝擊補償
             g_q = 1.0 / math.sqrt(flow_ratio) if flow_ratio > 0 else 1.0 # 再附著修正
-            gamma_eff = self.gamma_base * g_q
+            gamma_eff = pre_gamma_base * g_q
 
             # 獲取當前旋轉參數
             current_rpm = snapshot['rpm']
@@ -93,8 +100,8 @@ class PREGenerator:
                         r_val = np.linalg.norm(center)
                         
                         # 2. 瞬時強度計算 (Instantaneous Intensity, k)
-                        shear_part = self.alpha * (abs(omega) ** 1.5) * r_val
-                        impact_part = self.beta * c_q
+                        shear_part = pre_alpha * (abs(omega) ** 1.5) * r_val
+                        impact_part = pre_beta * c_q
                         k_raw = shear_part + impact_part
                         
                         # 3. 有效劑量因子 (Redeposition decay)
@@ -106,14 +113,14 @@ class PREGenerator:
                         # 5. 空間擴散累加
                         self._apply_dose_contribution(
                             dose_matrix, center[0], center[1], 
-                            dose_contribution, self.impact_radius, grid_size
+                            dose_contribution, pre_grid_radius, grid_size
                         )
 
             if snapshot.get('is_finished') or sim_clock > (total_duration + 10.0):
                 break
 
         # 6. 輸出結果
-        self._export_results(dose_matrix, filepath)
+        self._export_results(dose_matrix, filepath, config=config)
         return True
 
     def _apply_dose_contribution(self, matrix, x, y, contribution, radius, grid_size):
@@ -140,7 +147,7 @@ class PREGenerator:
                     spatial_weight = (radius - dist) / radius
                     matrix[i, j] += contribution * spatial_weight
 
-    def _export_results(self, matrix, filepath):
+    def _export_results(self, matrix, filepath, config=None):
         base_path, _ = os.path.splitext(filepath)
         png_path = filepath
         real_base = base_path.replace("_Cleaning_Dose", "")
@@ -148,6 +155,13 @@ class PREGenerator:
         radial_png_path = f"{real_base}_Cleaning_Dose_Radial_Distribution.png"
 
         data = matrix.T
+
+        # 提取參數用於顯示
+        alpha_val = config.get('PRE_ALPHA', PRE_ALPHA) if config else PRE_ALPHA
+        beta_val = config.get('PRE_BETA', PRE_BETA) if config else PRE_BETA
+        gamma_base_val = config.get('PRE_GAMMA_BASE', PRE_GAMMA_BASE) if config else PRE_GAMMA_BASE
+        impact_rad_val = config.get('PRE_GRID_SIZE', PRE_GRID_SIZE) if config else PRE_GRID_SIZE
+        q_ref_val = config.get('PRE_Q_REF', PRE_Q_REF) if config else PRE_Q_REF
 
         # 1. 繪製並儲存 PNG
         plt.figure(figsize=(11, 9), dpi=120)
@@ -180,10 +194,10 @@ class PREGenerator:
             f"Max Dose:     {h_max:.4f}\n"
             f"Mean Dose(>0):{h_mean:.4f}\n"
             f"Std Dev:      {h_std:.4f}\n"
-            f"Alpha:        {self.alpha:.6f}\n"
-            f"Beta:         {self.beta:.4f}\n"
-            f"Gamma Base:   {self.gamma_base:.4f}\n"
-            f"Impact Radius:{self.impact_radius}mm"
+            f"Alpha:        {alpha_val:.6f}\n"
+            f"Beta:         {beta_val:.4f}\n"
+            f"Gamma Base:   {gamma_base_val:.4f}\n"
+            f"Impact Radius:{impact_rad_val}mm"
         )
         plt.text(-145, -145, stats_text, color='white', fontsize=10,
                 family='monospace', fontweight='bold',
@@ -195,8 +209,8 @@ class PREGenerator:
 
         # 2. 儲存 CSV
         try:
-            header_str = (f"Cleaning Dose Data (Redeposition Model), Q_ref: {self.q_ref}mL/min, "
-                         f"Gamma_base: {self.gamma_base}, Impact Radius: {self.impact_radius}mm")
+            header_str = (f"Cleaning Dose Data (Redeposition Model), Q_ref: {q_ref_val}mL/min, "
+                         f"Gamma_base: {gamma_base_val}, Impact Radius: {impact_rad_val}mm")
             np.savetxt(csv_path, data, delimiter=",", fmt='%.6f', header=header_str)
         except Exception as e:
             print(f"Failed to write CSV: {e}")

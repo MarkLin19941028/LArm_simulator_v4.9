@@ -26,7 +26,7 @@ class VideoGenerator:
     def __init__(self, app_instance):
         self.app = app_instance
 
-    def _run_headless_video_generation(self, recipe, filepath, progress_widgets, play_speed_multiplier=1.0):
+    def _run_headless_video_generation(self, recipe, filepath, progress_widgets, play_speed_multiplier=1.0, config=None):
         """
         絕對截斷版：
         1. 排除任何引擎旗標干擾，純以計算出的總時長為準。
@@ -76,7 +76,7 @@ class VideoGenerator:
             'evaporation_rate': global_water_params['evaporation_rate']
         } for i in [1, 2, 3]}
 
-        engine = SimulationEngine(recipe, arms, water_params_dict, headless=True)
+        engine = SimulationEngine(recipe, arms, water_params_dict, headless=True, config=config)
         
         # --- 3. VideoWriter ---
         fig.canvas.draw()
