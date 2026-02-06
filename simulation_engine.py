@@ -1,32 +1,188 @@
 import numpy as np
 import math
 import random
+from numba import njit, prange
 from constants import *
+
+# Particle States
+P_INACTIVE = 0
+P_FALLING = 1
+P_ON_WAFER = 2
+
+@njit(fastmath=True, cache=True)
+def _physics_kernel(states, pos, vel, last_pos, life, time_on_wafer, path_length, arm_ids,
+                    dt, omega, cos_t, sin_t, 
+                    viscosities, evap_rates, surface_tensions,
+                    gravity, wafer_radius):
+    """
+    Numba 加速的物理步進核心。
+    使用平坦陣列 (SoA) 以獲得最佳快取效率。
+    """
+    n = states.shape[0]
+    for i in range(n):
+        state = states[i]
+        if state == P_INACTIVE:
+            continue
+            
+        arm_id = arm_ids[i]
+        visc = viscosities[arm_id]
+        evap = evap_rates[arm_id]
+        st_val = surface_tensions[arm_id]
+
+        # 1. 蒸發邏輯
+        if evap > 0:
+            life[i] -= evap * dt
+            if life[i] <= 0:
+                states[i] = P_INACTIVE
+                continue
+
+        # 紀錄上一位置
+        last_pos[i, 0] = pos[i, 0]
+        last_pos[i, 1] = pos[i, 1]
+
+        if state == P_FALLING:
+            # 重力加速與位置更新
+            vel[i, 2] -= gravity * dt
+            pos[i, 0] += vel[i, 0] * dt
+            pos[i, 1] += vel[i, 1] * dt
+            pos[i, 2] += vel[i, 2] * dt
+            
+            # 碰撞檢查 (落在晶圓上)
+            if pos[i, 2] <= 0:
+                dist_sq = pos[i, 0]**2 + pos[i, 1]**2
+                if dist_sq <= wafer_radius**2:
+                    states[i] = P_ON_WAFER
+                    pos[i, 2] = 0.0
+                    vel[i, 0] *= 0.1
+                    vel[i, 1] *= 0.1
+                    vel[i, 2] = 0.0
+                else:
+                    # 掉出晶圓外
+                    states[i] = P_INACTIVE
+                    continue
+        
+        elif state == P_ON_WAFER:
+            time_on_wafer[i] += dt
+            
+            x, y = pos[i, 0], pos[i, 1]
+            dist_sq = x*x + y*y
+            dist = math.sqrt(dist_sq)
+            
+            if dist > 1e-4:
+                # 1. 基礎離心加速度
+                inv_dist = 1.0 / dist
+                nx, ny = x * inv_dist, y * inv_dist
+                centrifugal_acc = omega * omega * dist
+                
+                # 2. 表面張力阻力 (徑向向心)
+                st_resistance = st_val * 0.3
+                
+                total_acc_mag = centrifugal_acc - st_resistance
+                
+                # 更新速度
+                vel[i, 0] += nx * total_acc_mag * dt
+                vel[i, 1] += ny * total_acc_mag * dt
+                
+                # 黏度阻尼
+                damping = (1.0 - 0.05 * visc * dt)
+                vel[i, 0] *= damping
+                vel[i, 1] *= damping
+                
+            # 更新位置
+            old_x, old_y = pos[i, 0], pos[i, 1]
+            pos[i, 0] += vel[i, 0] * dt
+            pos[i, 1] += vel[i, 1] * dt
+            
+            # 更新路徑長度
+            move_dist = math.sqrt((pos[i, 0] - old_x)**2 + (pos[i, 1] - old_y)**2)
+            path_length[i] += move_dist
+            
+            # 旋轉補償 (晶圓旋轉)
+            rx, ry = pos[i, 0], pos[i, 1]
+            pos[i, 0] = rx * cos_t - ry * sin_t
+            pos[i, 1] = rx * sin_t + ry * cos_t
+
+        # 移除邏輯
+        dist_sq_final = pos[i, 0]**2 + pos[i, 1]**2
+        if dist_sq_final > (wafer_radius + 20)**2 or pos[i, 2] < -10:
+            states[i] = P_INACTIVE
+
+# >>>>+++ REPLACE
+
 
 class SimulationEngine:
     def __init__(self, recipe, arms_dict, water_params_dict, headless=False, config=None):
         self.recipe = recipe
         self.arms = arms_dict
         self.water_params = water_params_dict
-        self.headless = headless # 新增 headless 標記
+        self.headless = headless
         self.config = config if config else {}
 
-        # 從 config 讀取參數，若無則使用 constants.py 的預設值
+        self.simulation_mode = self.config.get('SIMULATION_MODE', 'full')
         self.transition_arm_speed_ratio = self.config.get('TRANSITION_ARM_SPEED_RATIO', TRANSITION_ARM_SPEED_RATIO)
         self.arm_change_pause_time = self.config.get('ARM_CHANGE_PAUSE_TIME', ARM_CHANGE_PAUSE_TIME)
         self.center_pause_time = self.config.get('CENTER_PAUSE_TIME', CENTER_PAUSE_TIME)
         
-        self.particle_systems = {arm_id: [] for arm_id in arms_dict.keys()}
+        # --- Numba 陣列初始化 ---
+        self.max_particles = PARTICLE_MAX_COUNT
+        self.particles_state = np.zeros(self.max_particles, dtype=np.int32)
+        self.particles_pos = np.zeros((self.max_particles, 3), dtype=np.float64)
+        self.particles_vel = np.zeros((self.max_particles, 3), dtype=np.float64)
+        self.particles_last_pos = np.zeros((self.max_particles, 2), dtype=np.float64)
+        self.particles_life = np.zeros(self.max_particles, dtype=np.float64)
+        self.particles_time_on_wafer = np.zeros(self.max_particles, dtype=np.float64)
+        self.particles_path_length = np.zeros(self.max_particles, dtype=np.float64)
+        self.particles_birth_time = np.zeros(self.max_particles, dtype=np.float64)
+        self.particles_arm_id = np.zeros(self.max_particles, dtype=np.int32)
+        self.particles_id = np.zeros(self.max_particles, dtype=np.int32)
+        
         self.next_particle_id = 0
-        # 精確生成累加器
         self._spawn_accumulator = {arm_id: 0.0 for arm_id in arms_dict.keys()}
         
+        # 預先處理參數陣列以利 Numba 存取 (index 1-3)
+        self.viscosities = np.ones(10, dtype=np.float64)
+        self.evap_rates = np.zeros(10, dtype=np.float64)
+        self.surface_tensions = np.full(10, 72.8, dtype=np.float64)
+        
+        for arm_id, p in water_params_dict.items():
+            if arm_id < 10:
+                self.viscosities[arm_id] = p.get('viscosity', 1.0)
+                self.evap_rates[arm_id] = p.get('evaporation_rate', 0.0)
+                self.surface_tensions[arm_id] = p.get('surface_tension', 72.8)
+
         self._pre_calculate_physics()
         
         self.current_notch_coords = np.array([[WAFER_RADIUS, 0],
                                               [WAFER_RADIUS-NOTCH_DEPTH, NOTCH_HALF_WIDTH],
                                               [WAFER_RADIUS-NOTCH_DEPTH, -NOTCH_HALF_WIDTH]])
         self.reset()
+
+    @property
+    def particle_systems(self):
+        """
+        相容性 Property：將 NumPy 陣列包裝成舊版的字典列表格式。
+        供 AccuHeatmapGenerator 等組件暫時使用。
+        """
+        systems = {arm_id: [] for arm_id in self.arms.keys()}
+        for i in range(self.max_particles):
+            state_val = self.particles_state[i]
+            if state_val == P_INACTIVE:
+                continue
+            
+            arm_id = self.particles_arm_id[i]
+            p_dict = {
+                'id': self.particles_id[i],
+                'state': 'falling' if state_val == P_FALLING else 'on_wafer',
+                'life': self.particles_life[i],
+                'birth_time': self.particles_birth_time[i],
+                'time_on_wafer': self.particles_time_on_wafer[i],
+                'path_length': self.particles_path_length[i],
+                'pos': self.particles_pos[i].copy(),
+                'last_pos': self.particles_last_pos[i].copy()
+            }
+            if arm_id in systems:
+                systems[arm_id].append(p_dict)
+        return systems
 
     def reset(self):
         self.simulation_time_elapsed = 0.0
@@ -38,8 +194,7 @@ class SimulationEngine:
         self.current_step_label = "Init"
         self.current_rpm_value = 0.0
         
-        for arm_id in self.particle_systems:
-            self.particle_systems[arm_id] = []
+        self.particles_state.fill(P_INACTIVE)
         self.next_particle_id = 0
 
         first_proc = self.recipe['processes'][0]
@@ -62,46 +217,48 @@ class SimulationEngine:
                 self.transition_end_angle = arm.percent_to_angle(first_step_pos)
 
     def update(self, dt):
-        # 紀錄上一影格噴嘴位置，用於生成插值
         self.prev_nozzle_pos = self.last_nozzle_pos.copy()
         
-        # 安全取得當前製程
         if self.current_process_index < len(self.recipe['processes']):
             current_process = self.recipe['processes'][self.current_process_index]
         else:
             current_process = {'total_duration': 0, 'steps': []}
 
-        # Process Time 計時
         if self.animation_state == STATE_RUNNING_PROCESS:
             wall_time_in_proc = self.simulation_time_elapsed - self.time_offset_for_current_process
         else:
             wall_time_in_proc = 0.0
 
-        # RPM 計算
         if self.animation_state == STATE_RUNNING_PROCESS:
             self.current_rpm_value = self._get_rpm_at_time(current_process, wall_time_in_proc)
         
         current_rpm = self.current_rpm_value
         spin_dir = self.recipe.get('spin_dir', 'cw')
 
-        # 物理模擬 (效能優化：降低子步數至上限 10 步，大幅提升順暢度)
-        removed_this_frame = []
-        SUB_STEPS = min(10, 5 + int(current_rpm / 300)) 
-        sub_dt = dt / SUB_STEPS
-        
-        for i in range(SUB_STEPS):
-            # 1. 分步生成粒子 (確保流體連貫性)
-            if (self.active_arm_id and self.active_arm_id != 0) and (self.animation_state == STATE_RUNNING_PROCESS):
-                # 計算子步內的噴嘴位置插值
-                frac = (i + 1) / SUB_STEPS
-                interp_pos = self.prev_nozzle_pos + (self.last_nozzle_pos - self.prev_nozzle_pos) * frac
-                self._spawn_particles(self.active_arm_id, sub_dt, interp_pos)
+        if self.simulation_mode == 'full':
+            SUB_STEPS = min(10, 5 + int(current_rpm / 300)) 
+            sub_dt = dt / SUB_STEPS
+            
+            omega = (current_rpm / 60.0) * 2 * math.pi * (-1 if spin_dir == 'cw' else 1)
+            d_theta = omega * sub_dt
+            cos_t, sin_t = math.cos(d_theta), math.sin(d_theta)
 
-            # 2. 物理步進
-            removed = self._physics_step(sub_dt, current_rpm, spin_dir, current_process, wall_time_in_proc)
-            removed_this_frame.extend(removed)
+            for i in range(SUB_STEPS):
+                # 1. 分步生成粒子
+                if (self.active_arm_id and self.active_arm_id != 0) and (self.animation_state == STATE_RUNNING_PROCESS):
+                    frac = (i + 1) / SUB_STEPS
+                    interp_pos = self.prev_nozzle_pos + (self.last_nozzle_pos - self.prev_nozzle_pos) * frac
+                    self._spawn_particles(self.active_arm_id, sub_dt, interp_pos)
 
-        # 狀態機
+                # 2. 物理步進 (Numba 加速)
+                _physics_kernel(
+                    self.particles_state, self.particles_pos, self.particles_vel, self.particles_last_pos,
+                    self.particles_life, self.particles_time_on_wafer, self.particles_path_length, self.particles_arm_id,
+                    sub_dt, omega, cos_t, sin_t,
+                    self.viscosities, self.evap_rates, self.surface_tensions,
+                    GRAVITY_MMS2, WAFER_RADIUS
+                )
+
         if self.animation_state == STATE_RUNNING_PROCESS:
             if wall_time_in_proc >= current_process.get('total_duration', 0):
                 self._handle_process_transition(current_process)
@@ -112,32 +269,28 @@ class SimulationEngine:
         elif self.animation_state == STATE_ARM_CHANGE_PAUSE:
             if self.simulation_time_elapsed - self.transition_start_time >= self.arm_change_pause_time:
                 self._prepare_next_arm_move()
-                
         elif self.animation_state == STATE_PAUSE_AT_CENTER:
             if self.simulation_time_elapsed - self.transition_start_time >= self.center_pause_time:
                 self._prepare_move_center_to_start(current_process)
-                
         else:
             self._handle_arm_transition(current_process)
 
-        # 晶圓旋轉
         direction_mult = -1 if spin_dir == 'cw' else 1
         self.wafer_angle += (current_rpm / 60.0 * 360.0 * dt) * direction_mult
         
-        # Notch 計算
         rad = math.radians(self.wafer_angle)
         rot_matrix = np.array([[math.cos(rad), -math.sin(rad)], [math.sin(rad), math.cos(rad)]])
         base_notch = np.array([[WAFER_RADIUS, 0], [WAFER_RADIUS-NOTCH_DEPTH, NOTCH_HALF_WIDTH], [WAFER_RADIUS-NOTCH_DEPTH, -NOTCH_HALF_WIDTH]])
         self.current_notch_coords = np.dot(base_notch, rot_matrix.T)
 
-        render_data = {arm_id: self._get_render_paths(arm_id, dt, current_rpm, spin_dir) for arm_id in self.arms.keys()}
+        if self.simulation_mode == 'full':
+            render_data = {arm_id: self._get_render_paths(arm_id, dt, current_rpm, spin_dir) for arm_id in self.arms.keys()}
+        else:
+            render_data = {}
 
-        # 【極致精簡結束判定】
-        # 判斷是否所有製程都已結束 (包含最後一個製程結束後的手臂收回動作)
         is_finished = False
         if self.current_process_index >= len(self.recipe['processes']) - 1:
             if self.is_looping_back:
-                # 已經在最後的歸位階段
                 arm = self.arms.get(self.active_arm_id)
                 if arm:
                     angle_diff = arm._get_angle_diff(self.transition_end_angle, self.transition_start_angle)
@@ -148,15 +301,12 @@ class SimulationEngine:
                 else:
                     is_finished = True
             elif wall_time_in_proc >= current_process.get('total_duration', 0):
-                # 剛完成最後一個製程的 duration (或是無手臂製程)
                 if self.active_arm_id == 0:
                     is_finished = True
-                # 若 active_arm_id != 0，則等待下一幀進入 is_looping_back 狀態
 
         if not self.headless:
             self.simulation_time_elapsed += dt
         else:
-            # 在導出模式下，如果還沒結束，時間才繼續跑
             if not is_finished:
                 self.simulation_time_elapsed += dt
 
@@ -173,7 +323,7 @@ class SimulationEngine:
             'step_str': self.current_step_label,
             'water_render': render_data,
             'is_spraying': (self.animation_state == STATE_RUNNING_PROCESS),
-            'removed_particles': [], # 報表所需的空列表預留，避免報錯
+            'removed_particles': [],
             'is_finished': is_finished
         }
 
@@ -201,85 +351,7 @@ class SimulationEngine:
                 ds = last['t']
                 self.last_nozzle_pos = arm.percent_to_coords(last['pi'] + last['vi']*ds + 0.5*last['a']*ds**2)
 
-    def _physics_step(self, dt, rpm, spin_dir, current_process, wall_time):
-        removed_particles = []
-        omega = (rpm / 60.0) * 2 * math.pi * (-1 if spin_dir == 'cw' else 1)
-        d_theta = omega * dt
-        cos_t, sin_t = math.cos(d_theta), math.sin(d_theta)
-        
-        for arm_id, particles in self.particle_systems.items():
-            new_particles = []
-            params = self.water_params.get(arm_id, {})
-            visc = params.get('viscosity', 1.0)
-            evap = params.get('evaporation_rate', 0.0)
-            st_val = params.get('surface_tension', 72.8)
-            
-            for p in particles:
-                # 蒸發邏輯 (簡單生命值機制)
-                if evap > 0:
-                    p['life'] = p.get('life', 1.0) - evap * dt
-                    if p['life'] <= 0:
-                        continue
-
-                p['last_pos'] = p['pos'][:2].copy()
-                if p['state'] == 'falling':
-                    p['vel'][2] -= GRAVITY_MMS2 * dt
-                    p['pos'] += p['vel'] * dt
-                    if p['pos'][2] <= 0:
-                        if np.linalg.norm(p['pos'][:2]) <= WAFER_RADIUS:
-                            p['state'], p['pos'][2], p['vel'][:2] = 'on_wafer', 0, p['vel'][:2]*0.1
-                        else: continue
-                elif p['state'] == 'on_wafer':
-                    # 粒子路徑追蹤邏輯 (報表所需)
-                    p['time_on_wafer'] = p.get('time_on_wafer', 0.0) + dt
-                    
-                    dist = np.linalg.norm(p['pos'][:2])
-                    if dist > 1e-4:
-                        # 1. 基礎離心加速度
-                        centrifugal_acc = (p['pos'][:2]/dist) * (omega**2 * dist)
-                        
-                        # 2. 表面張力產生一個徑向向心的力
-                        st_resistance = -(p['pos'][:2]/dist) * (st_val * 0.3)
-                        
-                        # 合力加速度
-                        total_acc = centrifugal_acc + st_resistance
-                        
-                        # 更新速度
-                        old_vel = p['vel'][:2].copy()
-                        p['vel'][:2] += total_acc * dt
-                        
-                        # 黏度阻尼 (影響流速)
-                        p['vel'][:2] *= (1.0 - 0.05 * visc * dt)
-                        
-                    # 更新位置
-                    old_xy = p['pos'][:2].copy()
-                    p['pos'][:2] += p['vel'][:2] * dt
-                    
-                    # 更新路徑長度 (報表所需)
-                    move_dist = np.linalg.norm(p['pos'][:2] - old_xy)
-                    p['path_length'] = p.get('path_length', 0.0) + move_dist
-                    
-                    # 旋轉補償
-                    x, y = p['pos'][0], p['pos'][1]
-                    p['pos'][0], p['pos'][1] = x*cos_t - y*sin_t, x*sin_t + y*cos_t
-
-                # 強化移除邏輯：一旦超出晶圓邊界一定距離，或掉落太深，立刻移除
-                is_out_of_bounds = np.linalg.norm(p['pos'][:2]) > (WAFER_RADIUS + 20)
-                is_too_deep = p['pos'][2] < -10
-                
-                if not (is_out_of_bounds or is_too_deep):
-                    new_particles.append(p)
-                else:
-                    removed_particles.append(p)
-            self.particle_systems[arm_id] = new_particles
-        return removed_particles
-
     def _spawn_particles(self, arm_id, dt, custom_pos=None):
-        """
-        優化版粒子生成：
-        1. 採用體積累加制，確保生成量精確。
-        2. 支援噴嘴位置插值 (custom_pos)，消除低轉速下的成串感。
-        """
         current_process = self.recipe['processes'][self.current_process_index]
         flow = current_process.get('flow_rate', 500.0)
         params = self.water_params.get(arm_id, {})
@@ -292,23 +364,85 @@ class SimulationEngine:
         count = int(self._spawn_accumulator[arm_id])
         self._spawn_accumulator[arm_id] -= count 
         
+        if count <= 0: return
+        
         # 決定噴嘴基準位置
         nozzle_pos = custom_pos if custom_pos is not None else self.last_nozzle_pos
-
-        for _ in range(count):
-            off = (np.random.rand(2) - 0.5) * spread_base
+        
+        # 尋找空位
+        inactive_indices = np.where(self.particles_state == P_INACTIVE)[0]
+        if len(inactive_indices) == 0: return
+        
+        spawn_count = min(count, len(inactive_indices))
+        target_indices = inactive_indices[:spawn_count]
+        
+        # 批次初始化
+        for idx in target_indices:
+            self.particles_state[idx] = P_FALLING
+            self.particles_life[idx] = 1.0
+            self.particles_birth_time[idx] = self.simulation_time_elapsed
+            self.particles_time_on_wafer[idx] = 0.0
+            self.particles_path_length[idx] = 0.0
+            self.particles_arm_id[idx] = arm_id
+            self.particles_id[idx] = self.next_particle_id
             
-            self.particle_systems[arm_id].append({
-                'id': self.next_particle_id, 
-                'state': 'falling',
-                'life': 1.0,
-                'birth_time': self.simulation_time_elapsed,
-                'time_on_wafer': 0.0,
-                'path_length': 0.0,
-                'pos': np.array([nozzle_pos[0]+off[0], nozzle_pos[1]+off[1], 15.0]),
-                'vel': np.array([0.0, 0.0, -flow * 0.05])
-            })
+            off = (np.random.rand(2) - 0.5) * spread_base
+            self.particles_pos[idx] = [nozzle_pos[0]+off[0], nozzle_pos[1]+off[1], 15.0]
+            self.particles_vel[idx] = [0.0, 0.0, -flow * 0.05]
+            self.particles_last_pos[idx] = self.particles_pos[idx, :2]
+            
             self.next_particle_id += 1
+
+    def _get_render_paths(self, arm_id, dt, rpm, spin_dir):
+        """
+        產生渲染路徑。
+        目前保持 Python 實作以處理動態點數，但底層存取 NumPy 陣列。
+        """
+        f_xy = []
+        o_xy = []
+        
+        omega = (rpm / 60.0) * 2 * math.pi * (-1 if spin_dir == 'cw' else 1)
+        tdt = omega * dt
+        interp_steps = max(2, int(abs(math.degrees(tdt)) / 0.3)) 
+        interp_steps = min(interp_steps, WATER_RENDER_INTERPOLATION_LIMIT)
+        
+        # 過濾該 arm 的活躍粒子
+        mask = (self.particles_arm_id == arm_id) & (self.particles_state != P_INACTIVE)
+        indices = np.where(mask)[0]
+        
+        for i in indices:
+            state = self.particles_state[i]
+            pos = self.particles_pos[i]
+            last_p = self.particles_last_pos[i]
+            
+            if state == P_FALLING:
+                ps, pe = last_p, pos[:2]
+                dist = math.sqrt((pe[0]-ps[0])**2 + (pe[1]-ps[1])**2)
+                f_steps = max(1, int(dist / 0.5))
+                for j in range(1, f_steps + 1):
+                    frac = j / f_steps
+                    f_xy.append((ps[0] + (pe[0]-ps[0])*frac, ps[1] + (pe[1]-ps[1])*frac))
+                    
+            elif state == P_ON_WAFER:
+                ps, pe = last_p, pos[:2]
+                rs, re = math.sqrt(ps[0]**2 + ps[1]**2), math.sqrt(pe[0]**2 + pe[1]**2)
+                ts = math.atan2(ps[1], ps[0])
+                
+                for j in range(1, interp_steps + 1):
+                    frac = j / interp_steps
+                    ri = rs + (re - rs) * frac
+                    ti = ts + tdt * frac
+                    
+                    j_amt = WATER_JITTER_AMOUNT * (ri / WAFER_RADIUS)
+                    jx = (random.random() - 0.5) * j_amt
+                    jy = (random.random() - 0.5) * j_amt
+                    
+                    o_xy.append((ri * math.cos(ti) + jx, ri * math.sin(ti) + jy))
+                
+        return {
+            'falling': np.array(f_xy) if f_xy else np.empty((0, 2)),
+            'on_wafer': np.array(o_xy) if o_xy else np.empty((0, 2))
+        }
 
     def _handle_process_transition(self, current_process_obj):
         arm = self.arms.get(self.active_arm_id)
@@ -324,7 +458,6 @@ class SimulationEngine:
                 self.transition_end_angle = arm.home_angle
                 self.is_looping_back = True
             else:
-                # 在 headless 模式下，禁止重頭模擬
                 if not self.headless:
                     self._reset_to_start()
             return
@@ -366,7 +499,6 @@ class SimulationEngine:
             self.last_nozzle_pos = arm.angle_to_coords(self.transition_end_angle)
             if self.animation_state == STATE_ARM_MOVE_TO_HOME:
                 if self.is_looping_back:
-                    # 在 headless 模式下，即便標記為回原點完成，也不要觸發 reset_to_start
                     if not self.headless:
                         self._reset_to_start()
                 else:
@@ -415,9 +547,6 @@ class SimulationEngine:
             self.transition_end_angle = self.transition_start_angle
 
     def _pre_calculate_physics(self):
-        """
-        預先計算手臂移動路徑，實現平滑的線性加速/減速。
-        """
         for process in self.recipe['processes']:
             arm_id = process.get('arm_id', 0)
             if not arm_id or arm_id == 0: continue
@@ -440,9 +569,7 @@ class SimulationEngine:
                     v_i = v_i_mag * direction
                     v_f = v_f_mag * direction
                     
-                    # 計算平均速度以求得時間 (假設線性加速度)
                     v_avg_mag = (v_i_mag + v_f_mag) / 2.0
-                    # 避免除以零或極慢速導致卡死
                     if v_avg_mag < 0.1:
                         v_avg_mag = 0.1
                     
@@ -462,7 +589,6 @@ class SimulationEngine:
                 return segs
 
             f_segs = create_segments(steps, is_forward=True)
-            # 乒乓往返：從最後一步回到第一步
             b_segs = create_segments(steps[::-1], is_forward=False)
             
             all_s = f_segs + b_segs
@@ -474,55 +600,11 @@ class SimulationEngine:
                     d = abs(step['pos'] - arm.center_pos_percent)
                     if d < min_d: min_d, sfc_idx = d, k
                 
-                # 計算從第一個 f_seg 開始累計到目標 step 的時間
-                # 注意：這裡假設 start_from_center 是從正向路徑切入
                 sfc_t = 0.0
                 for m in range(min(sfc_idx, len(f_segs))):
                     sfc_t += f_segs[m]['t']
                     
             process['sfc_start_time'], process['sfc_target_idx'] = sfc_t, sfc_idx
-
-    def _get_render_paths(self, arm_id, dt, rpm, spin_dir):
-        """
-        大幅強化渲染連貫性：極致解析度版
-        """
-        f_xy = []
-        for p in self.particle_systems[arm_id]:
-            if p['state'] == 'falling':
-                ps, pe = p.get('last_pos', p['pos'][:2]), p['pos'][:2]
-                dist = np.linalg.norm(pe - ps)
-                f_steps = max(1, int(dist / 0.5)) # 提高解析度
-                for i in range(1, f_steps + 1):
-                    f_xy.append(tuple(ps + (pe - ps) * (i / f_steps)))
-
-        o_xy = []
-        omega = (rpm / 60.0) * 2 * math.pi * (-1 if spin_dir == 'cw' else 1)
-        tdt = omega * dt
-        
-        # 效能平衡：每 0.3 度一個採樣點
-        interp_steps = max(2, int(abs(math.degrees(tdt)) / 0.3)) 
-        interp_steps = min(interp_steps, WATER_RENDER_INTERPOLATION_LIMIT)
-
-        for p in self.particle_systems[arm_id]:
-            if p['state'] != 'on_wafer': continue
-            
-            ps, pe = p.get('last_pos', p['pos'][:2]), p['pos'][:2]
-            rs, re = np.linalg.norm(ps), np.linalg.norm(pe)
-            ts = math.atan2(ps[1], ps[0])
-            
-            for i in range(1, interp_steps + 1):
-                frac = i / interp_steps
-                ri = rs + (re - rs) * frac
-                ti = ts + tdt * frac
-                
-                # 徑向隨機度，打破同心圓
-                j_amt = WATER_JITTER_AMOUNT * (ri / WAFER_RADIUS) # 越邊緣擾動越大
-                jx = (random.random() - 0.5) * j_amt
-                jy = (random.random() - 0.5) * j_amt
-                
-                o_xy.append((ri * math.cos(ti) + jx, ri * math.sin(ti) + jy))
-                
-        return {'falling': f_xy, 'on_wafer': o_xy}
 
     def _get_rpm_at_time(self, process, time_in_proc):
         spin, total_d = process.get('spin_params', {}), process.get('total_duration', 1.0)

@@ -104,8 +104,19 @@ class VideoGenerator:
             water_render = snapshot['water_render']
             for arm_id, artists in water_artists.items():
                 d = water_render.get(arm_id, {})
-                artists['falling'].set_data([p[0] for p in d.get('falling', [])], [p[1] for p in d.get('falling', [])])
-                artists['on_wafer'].set_data([p[0] for p in d.get('on_wafer', [])], [p[1] for p in d.get('on_wafer', [])])
+                f_data = d.get('falling', np.empty((0, 2)))
+                o_data = d.get('on_wafer', np.empty((0, 2)))
+                
+                # 支援 NumPy 陣列優化繪圖
+                if isinstance(f_data, np.ndarray) and f_data.size > 0:
+                    artists['falling'].set_data(f_data[:, 0], f_data[:, 1])
+                else:
+                    artists['falling'].set_data([], [])
+                    
+                if isinstance(o_data, np.ndarray) and o_data.size > 0:
+                    artists['on_wafer'].set_data(o_data[:, 0], o_data[:, 1])
+                else:
+                    artists['on_wafer'].set_data([], [])
 
             notch_patch.set_xy(snapshot['notch_coords'])
             

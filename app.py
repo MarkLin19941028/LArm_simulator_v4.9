@@ -25,6 +25,7 @@ from constants import * # 導入所有常數
 from recipe_manager import RecipeManager
 from video_generator import VideoGenerator
 from etchingamount_generator import EtchingAmountGenerator
+from accu_heatmap_generator import AccuHeatmapGenerator
 from PRE_generator import PREGenerator
 from simulation_config_def import PARAMETER_DEFINITIONS, get_default_config
 
@@ -48,15 +49,23 @@ class WaterColumn:
         self.clear()
         
         if self.artist:
-            if falling_xy:
-                self.artist.set_data([p[0] for p in falling_xy], [p[1] for p in falling_xy])
+            if falling_xy is not None and len(falling_xy) > 0:
+                # 支援 NumPy 陣列優化
+                if isinstance(falling_xy, np.ndarray):
+                    self.artist.set_data(falling_xy[:, 0], falling_xy[:, 1])
+                else:
+                    self.artist.set_data([p[0] for p in falling_xy], [p[1] for p in falling_xy])
                 self.artist.set_visible(True)
             else:
                 self.artist.set_data([], [])
         
         if self.on_wafer_artist:
-            if on_wafer_xy:
-                self.on_wafer_artist.set_data([p[0] for p in on_wafer_xy], [p[1] for p in on_wafer_xy])
+            if on_wafer_xy is not None and len(on_wafer_xy) > 0:
+                # 支援 NumPy 陣列優化
+                if isinstance(on_wafer_xy, np.ndarray):
+                    self.on_wafer_artist.set_data(on_wafer_xy[:, 0], on_wafer_xy[:, 1])
+                else:
+                    self.on_wafer_artist.set_data([p[0] for p in on_wafer_xy], [p[1] for p in on_wafer_xy])
                 self.on_wafer_artist.set_visible(True)
             else:
                 self.on_wafer_artist.set_data([], [])
@@ -815,16 +824,22 @@ class SimulationApp:
             self._pre_export_lock = False
 
     def export_accumulation_heatmap(self):
+        """
+        導出累積熱圖的方法 (整合 Numba 優化版 Generator)
+        """
+        # 1. 防止重複觸發鎖定
         if getattr(self, '_heatmap_export_lock', False):
             return
         self._heatmap_export_lock = True
         
         try:
+            # 2. 解析製程 Recipe
             parsed_recipe = self.parse_and_prepare_recipe()
             if not parsed_recipe:
                 self._heatmap_export_lock = False
                 return
 
+            # 3. 讓使用者選擇儲存路徑
             user_path = filedialog.asksaveasfilename(
                 defaultextension=".png",
                 filetypes=[("PNG Files", "*.png"), ("All Files", "*.*")],
@@ -834,140 +849,92 @@ class SimulationApp:
                 self._heatmap_export_lock = False
                 return
 
-            # 套用命名規範
+            # 套用內部命名規範
             base_path, ext = os.path.splitext(user_path)
-            filepath = f"{base_path}_Accumulation_Heatmap{ext}"
+            # 確保檔名包含特定後綴，以便 Generator 內部邏輯識別
+            if not base_path.endswith("_Accumulation_Heatmap"):
+                filepath = f"{base_path}_Accumulation_Heatmap{ext}"
+            else:
+                filepath = user_path
 
+            # 4. 計算預期 FPS (根據最高轉速動態調整，確保取樣密度)
             max_rpm = 0
             for proc in parsed_recipe['processes']:
                 spin = proc['spin_params']
                 current_max = spin['rpm'] if spin['mode'] == 'Simple' else max(spin['start_rpm'], spin['end_rpm'])
                 if current_max > max_rpm: max_rpm = current_max
             
+            # 建議取樣率：轉速的 4 倍，最低不低於 800
             suggested_fps = max(800, int(max_rpm * 4))
             parsed_recipe['dynamic_report_fps'] = suggested_fps
 
+            # 5. 建立進度條視窗
             progress_window = tk.Toplevel(self.root)
             progress_window.title("Generating Heatmap")
-            progress_window.geometry("400x120")
+            progress_window.geometry("400x150")
             progress_window.transient(self.root)
             progress_window.grab_set()
             progress_window.resizable(False, False)
-            ttk.Label(progress_window, text="Generating accumulation heatmap, please wait...", padding=10).pack()
+            
+            ttk.Label(progress_window, text="Generating high-performance accumulation heatmap...", padding=10).pack()
 
             total_duration = sum(p['total_duration'] for p in parsed_recipe['processes'])
             if total_duration <= 0: total_duration = 1.0
             
-            progress_label = ttk.Label(progress_window, text=f"Processing: 0.0s / {total_duration:.1f}s (0%)", padding=(0, 5))
+            progress_label = ttk.Label(progress_window, text=f"Initializing JIT Engine...", padding=(0, 5))
             progress_label.pack()
+            
             progress_bar = ttk.Progressbar(progress_window, orient="horizontal", length=350, mode="determinate", maximum=total_duration)
             progress_bar.pack(pady=10)
-            progress_widgets = {'window': progress_window, 'bar': progress_bar, 'label': progress_label}
             
-            _, _, heatmap_matrix = self._run_headless_simulation(parsed_recipe, progress_widgets)
+            progress_widgets = {
+                'window': progress_window, 
+                'bar': progress_bar, 
+                'label': progress_label
+            }
+
+            # 6. 呼叫優化後的 Generator
+            current_config = self.get_current_config()
             
+            # 初始化 Generator (傳入 self 以便它能存取 _get_water_params)
+            generator = AccuHeatmapGenerator(self)
+            
+            # 執行運算 (內部會自動使用 Numba 加速)
+            success = generator.generate(
+                recipe=parsed_recipe, 
+                filepath=filepath, 
+                config=current_config, 
+                progress_widgets=progress_widgets
+            )
+
+            # 7. 完成後關閉進度視窗
             if progress_window.winfo_exists():
                 progress_window.destroy()
 
-            if heatmap_matrix is not None:
-                heatmap_png_path = filepath
-                heatmap_csv_path = f"{base_path}_Accumulation_RawData.csv"
-                
-                data = heatmap_matrix.T
-                grid_dim = int(np.sqrt(data.size))
-                if data.ndim == 1: data = data.reshape((grid_dim, grid_dim))
-                    
-                if data.size > 0:
-                    h_max = np.max(data)
-                    h_median = np.median(data[data > 0]) if np.any(data > 0) else 0.0
-                    h_std = np.std(data)
-                else:
-                    h_max = h_median = h_std = 0.0
+            if success:
+                # 提示成功，列出產生的檔案類型
+                messagebox.showinfo("Success", 
+                    f"Accumulation Heatmap sequence exported successfully:\n\n"
+                    f"1. Heatmap PNG (Quantitative)\n"
+                    f"2. Radial Distribution Plot\n"
+                    f"3. Raw Data CSV (Residence Time)")
 
-                plt.figure(figsize=(11, 9), dpi=120)
-                im = plt.imshow(data, origin='lower', extent=[-150, 150, -150, 150], cmap='magma', interpolation='nearest')
-                cbar = plt.colorbar(im, fraction=0.046, pad=0.04)
-                cbar.set_label('Accumulated Residence Time (Seconds)')
-                wafer_circle = plt.Circle((0, 0), 150, color='white', fill=False, linestyle='--', alpha=0.5)
-                plt.gca().add_artist(wafer_circle)
-                plt.title("Wafer Water Accumulation Heatmap (Quantitative)", fontsize=14, pad=15)
-                plt.xlabel("X Position (mm)")
-                plt.ylabel("Y Position (mm)")
-                
-                stats_text = (f"Max Time:    {h_max:.4f} s\n"
-                            f"Median(>0):  {h_median:.4f} s\n"
-                            f"Std Dev:     {h_std:.4f}\n"
-                            f"Resolution:  1.0 mm/pixel")
-                plt.text(-145, -145, stats_text, color='white', fontsize=10, family='monospace', fontweight='bold',
-                        bbox=dict(facecolor='black', alpha=0.6, edgecolor='none'))
-
-                plt.tight_layout()
-                plt.savefig(heatmap_png_path, bbox_inches='tight', dpi=300)
-                plt.close()
-
-                try:
-                    np.savetxt(heatmap_csv_path, data, delimiter=",", fmt='%.6f', 
-                               header="Raw Accumulation Data (Seconds), Resolution: 1.0mm/pixel, Range: -150 to 150 mm")
-                except Exception as e:
-                    messagebox.showerror("Export Error", f"Failed to write heatmap raw data to CSV: {e}")
-                
-                # 3. 輸出徑向分佈圖 (Radial Distribution)
-                radial_png_path = f"{base_path}_Accumulation_Radial_Distribution.png"
-                self._export_accumulation_radial_distribution(heatmap_matrix, radial_png_path)
-                
-                messagebox.showinfo("Success", f"Heatmap PNG, Radial Plot and Raw Data CSV exported successfully:\n{heatmap_png_path}\n{radial_png_path}\n{heatmap_csv_path}")
-
+        except ImportError as e:
+            # 針對 Numba 未安裝的錯誤處理
+            messagebox.showerror("Dependency Error", 
+                "High-performance library 'numba' not found.\n\n"
+                "Please run: pip install numba\n"
+                "Or use the standard simulation mode.")
         except Exception as e:
-            messagebox.showerror("Heatmap Error", f"Failed during heatmap generation phase: {e}")
+            # 捕捉其他運行時錯誤
+            import traceback
+            error_details = traceback.format_exc()
+            print(f"Heatmap Export Error:\n{error_details}")
+            messagebox.showerror("Heatmap Error", f"An error occurred during generation:\n{str(e)}")
             if 'progress_window' in locals() and progress_window.winfo_exists():
                 progress_window.destroy()
         finally:
             self._heatmap_export_lock = False
-
-    def _export_accumulation_radial_distribution(self, matrix, filepath):
-        """
-        計算並輸出隨半徑變化的累積時間分佈圖 (Radial Distribution)
-        """
-        grid_size = matrix.shape[0]
-        center = grid_size / 2.0
-        
-        # 建立坐標網格
-        y, x = np.indices(matrix.shape)
-        r = np.sqrt((x - center + 0.5)**2 + (y - center + 0.5)**2)
-        
-        # 將半徑以 1mm 為單位分組 (0 to 150)
-        r_rounded = r.astype(int)
-        max_r = int(WAFER_RADIUS)
-        
-        radial_sum = np.zeros(max_r + 1)
-        radial_count = np.zeros(max_r + 1)
-        
-        # 向量化累加 (僅考慮晶圓範圍內)
-        mask = r_rounded <= max_r
-        np.add.at(radial_sum, r_rounded[mask], matrix[mask])
-        np.add.at(radial_count, r_rounded[mask], 1)
-        
-        # 計算平均值 (避免除以零)
-        radial_avg = np.divide(radial_sum, radial_count, out=np.zeros_like(radial_sum), where=radial_count > 0)
-        
-        # 繪圖
-        plt.figure(figsize=(10, 6), dpi=100)
-        plt.plot(np.arange(len(radial_avg)), radial_avg, color='red', linewidth=2, label='Average Accumulation')
-        
-        # 填色優化
-        plt.fill_between(np.arange(len(radial_avg)), radial_avg, alpha=0.2, color='red')
-        
-        plt.title("Radial Accumulation Distribution", fontsize=14, pad=15)
-        plt.xlabel("Radius (mm)", fontsize=12)
-        plt.ylabel("Average Accumulation Time (s)", fontsize=12)
-        plt.xlim(0, max_r)
-        plt.xticks(np.arange(0, max_r + 1, 10))
-        plt.ylim(0, np.max(radial_avg) * 1.1 if np.max(radial_avg) > 0 else 1.0)
-        plt.grid(True, linestyle='--', alpha=0.7)
-
-        plt.tight_layout()
-        plt.savefig(filepath, bbox_inches='tight', dpi=300)
-        plt.close()
 
     def export_nozzle_pattern(self):
         parsed_recipe = self.parse_and_prepare_recipe()
@@ -1024,7 +991,11 @@ class SimulationApp:
             geo = ARM_GEOMETRIES[i]
             headless_arms[i] = DispenseArm(i, geo['pivot'], geo['home'], geo['length'], geo['p_start'], geo['p_end'], None, None)
 
-        engine = SimulationEngine(recipe, headless_arms, {}, headless=True)
+        # 建立 config 並指定模式
+        pattern_config = self.get_current_config() # 獲取目前的物理參數
+        pattern_config['SIMULATION_MODE'] = 'pattern_only' # 強制覆蓋為純軌跡模式
+
+        engine = SimulationEngine(recipe, headless_arms, {}, headless=True, config=pattern_config)
 
         arm_trajectories = {1: [], 2: [], 3: []}
         dt = 1.0 / REPORT_FPS
@@ -1095,8 +1066,6 @@ class SimulationApp:
        
         report_data = []
         particle_registry = {} 
-        grid_size = 300
-        heatmap_accum = np.zeros((grid_size, grid_size))
        
         report_fps = recipe.get('dynamic_report_fps', REPORT_FPS)
         dt = 1.0 / report_fps
@@ -1110,28 +1079,16 @@ class SimulationApp:
             sim_clock += dt
             time_since_last_log += dt
            
-            for arm_id, particles in engine.particle_systems.items():
-                for p in particles:
-                    pid = p['id']
-                    if pid not in particle_registry:
-                        particle_registry[pid] = {'id': pid, 'time_on_wafer': 0.0, 'path_length': 0.0}
-                    if p['state'] == 'on_wafer':
-                        particle_registry[pid]['time_on_wafer'] = p['time_on_wafer']
-                        particle_registry[pid]['path_length'] = p['path_length']
-
-            rad_wafer = math.radians(snapshot['wafer_angle'])
-            cos_t, sin_t = np.cos(-rad_wafer), np.sin(-rad_wafer)
-            rot_back = np.array([[cos_t, -sin_t], [sin_t, cos_t]])
-
-            active_coords = []
-            for particles in engine.particle_systems.values():
-                for p_item in particles:
-                    if p_item['state'] == 'on_wafer':
-                        active_coords.append(np.dot(rot_back, p_item['pos'][:2]))
-
-            if active_coords:
-                hist, _, _ = np.histogram2d(np.array(active_coords)[:,0], np.array(active_coords)[:,1], bins=grid_size, range=[[-150, 150], [-150, 150]])
-                heatmap_accum += hist * dt
+            # 直接從 engine 的 numpy 陣列提取資訊 (效能優化)
+            active_mask = engine.particles_state != 0 # P_INACTIVE
+            active_indices = np.where(active_mask)[0]
+            for i in active_indices:
+                pid = engine.particles_id[i]
+                if pid not in particle_registry:
+                    particle_registry[pid] = {'id': pid, 'time_on_wafer': 0.0, 'path_length': 0.0}
+                if engine.particles_state[i] == 2: # P_ON_WAFER
+                    particle_registry[pid]['time_on_wafer'] = engine.particles_time_on_wafer[i]
+                    particle_registry[pid]['path_length'] = engine.particles_path_length[i]
 
             is_finished = snapshot.get('is_finished', False)
             if time_since_last_log >= report_log_interval or is_finished:
@@ -1145,9 +1102,9 @@ class SimulationApp:
                     except: pass
 
                 nozzle_pos = snapshot['nozzle_pos']
-                all_on_wafer_coords = []
-                for particles in engine.particle_systems.values():
-                    all_on_wafer_coords.extend([p['pos'][:2] for p in particles if p['state'] == 'on_wafer'])
+                # 優化：直接從 NumPy 陣列過濾在晶圓上的粒子座標
+                on_wafer_mask = engine.particles_state == 2 # P_ON_WAFER
+                all_on_wafer_coords = engine.particles_pos[on_wafer_mask, :2]
 
                 radial_counts = calculate_water_counts_by_radius(all_on_wafer_coords, WAFER_RADIUS, REPORT_INTERVAL_MM)
                 nozzle_r = np.linalg.norm(nozzle_pos) if snapshot['active_arm_id'] != 0 else 0.0
@@ -1177,9 +1134,8 @@ class SimulationApp:
         print(f" ● Total Particles Captured       : {len(final_particles_list):,} pts")
         print(f" ● Simulated Duration             : {sim_clock:.2f} s / {total_duration:.2f} s")
         print(f" ● Time Step (dt) / Frame Rate    : {dt:.6e} s / {report_fps} FPS")
-        print(f" ● Heatmap Intensity              : Max={np.max(heatmap_accum):.4f}, Median{np.median(heatmap_accum):.4f}")
         print(f" ● Report Log Entries             : {len(report_data):,} lines \n" + "-"*60 + "\n Status: Calculation completed \n" + "="*60 + "\n")
-        return report_data, final_particles_list, heatmap_accum
+        return report_data, final_particles_list, None
 
     def parse_and_prepare_recipe(self):
         try:

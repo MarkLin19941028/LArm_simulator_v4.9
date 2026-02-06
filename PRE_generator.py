@@ -2,6 +2,8 @@ import numpy as np
 import math
 import os
 import matplotlib.pyplot as plt
+from numba import njit # [新增]
+
 from models import DispenseArm
 from simulation_engine import SimulationEngine
 from constants import (
@@ -10,35 +12,56 @@ from constants import (
     PRE_Q_REF, PRE_GAMMA_BASE
 )
 
+# --- [新增] Numba 加速核心函數 ---
+@njit(fastmath=True, cache=True)
+def _numba_apply_pre_kernel(matrix, center_x, center_y, contribution, radius, grid_size):
+    """
+    Numba 加速版的 PRE Dose 累加器。
+    """
+    idx_x = center_x + 150.0
+    idx_y = center_y + 150.0
+    
+    r_pixel = int(math.ceil(radius))
+    
+    min_i = max(0, int(math.floor(idx_x - r_pixel)))
+    max_i = min(grid_size - 1, int(math.ceil(idx_x + r_pixel)))
+    min_j = max(0, int(math.floor(idx_y - r_pixel)))
+    max_j = min(grid_size - 1, int(math.ceil(idx_y + r_pixel)))
+
+    radius_sq = radius * radius
+    
+    for i in range(min_i, max_i + 1):
+        for j in range(min_j, max_j + 1):
+            dist_sq = (i - idx_x)**2 + (j - idx_y)**2
+            if dist_sq <= radius_sq:
+                dist = math.sqrt(dist_sq)
+                # 線性空間權重
+                spatial_weight = (radius - dist) / radius
+                
+                # 累加
+                matrix[i, j] += contribution * spatial_weight
+
 class PREGenerator:
     def __init__(self, app_instance):
         self.app = app_instance
 
     def generate(self, recipe, filepath, config=None, progress_widgets=None):
         """
-        Cleaning Dose 模擬邏輯：
-        1. 使用結合流量補償與再附著衰減的混合型一階動力學模型
-        2. k = (alpha * omega^1.5 * r) + (beta * C_q)
-        3. Dose_eff = sum( [ k * exp(-gamma_eff * r) * dt ] )
-        4. 空間分佈：擴散至 PRE_GRID_SIZE 範圍
+        Cleaning Dose 模擬邏輯 (Numba 加速版)
         """
-        # 合併配置
         if config is None:
             from simulation_config_def import get_default_config
             config = get_default_config()
 
-        # 提取 PRE 參數
         pre_alpha = config.get('PRE_ALPHA', PRE_ALPHA)
         pre_beta = config.get('PRE_BETA', PRE_BETA)
         pre_grid_radius = config.get('PRE_GRID_SIZE', PRE_GRID_SIZE)
         pre_q_ref = config.get('PRE_Q_REF', PRE_Q_REF)
         pre_gamma_base = config.get('PRE_GAMMA_BASE', PRE_GAMMA_BASE)
 
-        # 1. 初始化 Headless Arms
         headless_arms = {i: DispenseArm(i, geo['pivot'], geo['home'], geo['length'], geo['p_start'], geo['p_end'], None, None) 
                          for i, geo in ARM_GEOMETRIES.items()}
 
-        # 獲取物理參數
         water_params = self.app._get_water_params()
         water_params_dict = {i: {
             'viscosity': water_params['viscosity'],
@@ -46,114 +69,85 @@ class PREGenerator:
             'evaporation_rate': water_params['evaporation_rate']
         } for i in [1, 2, 3]}
 
-        # 2. 實例化引擎
         engine = SimulationEngine(recipe, headless_arms, water_params_dict, headless=True, config=config)
         
-        # 3. 準備 Dose 矩陣 (1.0mm per pixel)
         grid_size = 300
-        dose_matrix = np.zeros((grid_size, grid_size))
+        dose_matrix = np.zeros((grid_size, grid_size), dtype=np.float64)
         
-        # 4. 設定模擬步長
         report_fps = recipe.get('dynamic_report_fps', REPORT_FPS)
         dt = 1.0 / report_fps
         total_duration = sum(p['total_duration'] for p in recipe['processes'])
         sim_clock = 0.0
 
-        # 5. 執行模擬
         while True:
-            snapshot = engine.update(dt)
+            snapshot = engine.update(dt) 
             sim_clock += dt
             
-            # 更新 UI 進度
             if progress_widgets:
                 try:
                     p_bar = progress_widgets['bar']
                     p_label = progress_widgets['label']
                     p_bar['value'] = min(sim_clock, total_duration)
-                    p_label.config(text=f"Dose Simulation: {sim_clock:.1f}s / {total_duration:.1f}s")
+                    p_label.config(text=f"Dose Simulation (Accelerated): {sim_clock:.1f}s / {total_duration:.1f}s")
                     progress_widgets['window'].update_idletasks()
                 except: pass
 
-            # 流量與補償係數計算
             current_proc = recipe['processes'][snapshot['process_idx']]
             q_actual = current_proc.get('flow_rate', pre_q_ref)
             flow_ratio = q_actual / pre_q_ref
-            c_q = math.sqrt(flow_ratio) # 衝擊補償
-            g_q = 1.0 / math.sqrt(flow_ratio) if flow_ratio > 0 else 1.0 # 再附著修正
+            c_q = math.sqrt(flow_ratio) 
+            g_q = 1.0 / math.sqrt(flow_ratio) if flow_ratio > 0 else 1.0 
             gamma_eff = pre_gamma_base * g_q
 
-            # 獲取當前旋轉參數
             current_rpm = snapshot['rpm']
             omega = (current_rpm / 60.0) * 2 * math.pi
             
-            # 獲取座標轉換矩陣 (晶圓座標系)
             rad_wafer = math.radians(snapshot['wafer_angle'])
             cos_t, sin_t = np.cos(-rad_wafer), np.sin(-rad_wafer)
-            rot_back = np.array([[cos_t, -sin_t], [sin_t, cos_t]])
 
-            # 遍歷粒子進行 Dose 計算與空間擴散
-            for particles in engine.particle_systems.values():
-                for p in particles:
-                    if p['state'] == 'on_wafer':
-                        # 1. 座標轉換與半徑計算
-                        center = np.dot(rot_back, p['pos'][:2])
-                        r_val = np.linalg.norm(center)
-                        
-                        # 2. 瞬時強度計算 (Instantaneous Intensity, k)
-                        shear_part = pre_alpha * (abs(omega) ** 1.5) * r_val
-                        impact_part = pre_beta * c_q
-                        k_raw = shear_part + impact_part
-                        
-                        # 3. 有效劑量因子 (Redeposition decay)
-                        eta = math.exp(-gamma_eff * r_val)
-                        
-                        # 4. 該步最終權重
-                        dose_contribution = k_raw * eta * dt
-                        
-                        # 5. 空間擴散累加
-                        self._apply_dose_contribution(
-                            dose_matrix, center[0], center[1], 
-                            dose_contribution, pre_grid_radius, grid_size
-                        )
+            # 優化：直接從引擎的 NumPy 陣列提取
+            on_wafer_mask = engine.particles_state == 2 # P_ON_WAFER
+            if np.any(on_wafer_mask):
+                indices = np.where(on_wafer_mask)[0]
+                for i in indices:
+                    # 1. 座標轉換
+                    px, py = engine.particles_pos[i, 0], engine.particles_pos[i, 1]
+                    center_x = px * cos_t - py * sin_t
+                    center_y = px * sin_t + py * cos_t
+                    
+                    r_val = math.sqrt(center_x**2 + center_y**2)
+                    
+                    # 2. 瞬時強度計算
+                    shear_part = pre_alpha * (abs(omega) ** 1.5) * r_val
+                    impact_part = pre_beta * c_q
+                    k_raw = shear_part + impact_part
+                    
+                    # 3. 有效劑量因子
+                    eta = math.exp(-gamma_eff * r_val)
+                    dose_contribution = k_raw * eta * dt
+                    
+                    # 4. [修改] 呼叫 Numba 核心
+                    _numba_apply_pre_kernel(
+                        dose_matrix, 
+                        center_x, center_y, 
+                        dose_contribution, 
+                        pre_grid_radius, 
+                        grid_size
+                    )
 
             if snapshot.get('is_finished') or sim_clock > (total_duration + 10.0):
                 break
 
-        # 6. 輸出結果
         self._export_results(dose_matrix, filepath, config=config)
         return True
-
-    def _apply_dose_contribution(self, matrix, x, y, contribution, radius, grid_size):
-        """
-        將清洗 Dose 貢獻擴散到指定半徑內的像素
-        使用距離線性加權：(radius - dist) / radius
-        """
-        # 座標轉換：從 (-150, 150) 轉為 (0, 300)
-        idx_x = x + 150
-        idx_y = y + 150
-        
-        # 取得影響範圍
-        r_pixel = int(math.ceil(radius))
-        min_i = max(0, int(math.floor(idx_x - r_pixel)))
-        max_i = min(grid_size - 1, int(math.ceil(idx_x + r_pixel)))
-        min_j = max(0, int(math.floor(idx_y - r_pixel)))
-        max_j = min(grid_size - 1, int(math.ceil(idx_y + r_pixel)))
-
-        for i in range(min_i, max_i + 1):
-            for j in range(min_j, max_j + 1):
-                dist_sq = (i - idx_x)**2 + (j - idx_y)**2
-                if dist_sq <= radius**2:
-                    dist = math.sqrt(dist_sq)
-                    spatial_weight = (radius - dist) / radius
-                    matrix[i, j] += contribution * spatial_weight
-
+    
     def _export_results(self, matrix, filepath, config=None):
         base_path, _ = os.path.splitext(filepath)
         png_path = filepath
         real_base = base_path.replace("_Cleaning_Dose", "")
         csv_path = f"{real_base}_Cleaning_Dose_RawData.csv"
         radial_png_path = f"{real_base}_Cleaning_Dose_Radial_Distribution.png"
-
+        
         data = matrix.T
 
         # 提取參數用於顯示

@@ -38,7 +38,7 @@ def calculate_water_counts_by_radius(drops_coordinates, wafer_radius=WAFER_RADIU
         counts[header] = 0
         column_headers.append(header)
 
-    if not drops_coordinates:
+    if drops_coordinates is None or len(drops_coordinates) == 0:
         return counts
 
     # 統計落點
