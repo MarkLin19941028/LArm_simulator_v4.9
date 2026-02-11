@@ -54,11 +54,12 @@ TRANSITION_ARM_SPEED_RATIO = 0.8  # Arm 轉換狀態下的速度比例 (用於�
 
 # --- Etching Amount Simulation Constants ---
 ETCHING_TAU = 0.3                 # 老化模型衰減常數 (s)
-GRID_SIZE = 10.0                  # 蝕刻影響半徑 (mm)
-ETCHING_IMPINGEMENT_TIME = 0.01   # 判定為衝擊區的在晶圓時間門檻 (s)
-ETCHING_IMPINGEMENT_BONUS = 2.0   # 衝擊區的強度加成倍數
-ETCHING_GEO_SMOOTHING = 7.0      # 幾何釋平滑常數
-ETCHING_SATURATION_THRESHOLD = 0.002 # 每一步長單個像素點的最大蝕刻貢獻飽和值 (配合像素級飽和邏輯)
+GRID_SIZE = 5.0                   # 蝕刻影響半徑 (mm)
+ETCHING_IMPINGEMENT_BONUS = 1.2   # 衝擊區的強度加成倍數
+ETCHING_GEO_SMOOTHING = 0.1       # 幾何釋平滑常數
+ETCHING_SATURATION_THRESHOLD = 0.002 # 每一步長單個像素點的最大蝕刻貢獻飽和值
+ETCHING_SATURATION_THICKNESS = 0.2   # 飽和膜厚 (mm)
+ETCHING_BASE_SPIN_DECAY = 2.0        # 基礎甩乾速率 (1/s)
 
 # --- PRE (Particle Removal Efficiency) Constants ---
 PRE_ALPHA = 0.001               # 剪切項係數

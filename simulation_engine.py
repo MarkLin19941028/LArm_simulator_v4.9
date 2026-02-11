@@ -140,7 +140,7 @@ def _physics_kernel(states, pos, vel, last_pos, life, time_on_wafer, path_length
                 # D. 科氏力 (-2 * omega x v)
                 # 加上抑制參數避免力道過強
                 # 經驗上，在這種簡易流體模型中，0.2~0.5 的係數比較符合視覺預期
-                CORIOLIS_FACTOR = 0.75 
+                CORIOLIS_FACTOR = 0.3 
                 ax_cor =  -2 * omega * vy * CORIOLIS_FACTOR
                 ay_cor = 2 * omega * vx * CORIOLIS_FACTOR
                 

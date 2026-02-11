@@ -2,33 +2,32 @@ import numpy as np
 import math
 import os
 import matplotlib.pyplot as plt
-from numba import njit, prange  # [修改] 引入 prange 支援平行運算
+from numba import njit  # [新增] 引入 Numba
 
 from models import DispenseArm
 from simulation_engine import SimulationEngine
 from constants import (
     ARM_GEOMETRIES, WAFER_RADIUS, REPORT_FPS, 
     GRID_SIZE, ETCHING_TAU,
-    ETCHING_IMPINGEMENT_BONUS,
-    ETCHING_GEO_SMOOTHING, ETCHING_SATURATION_THRESHOLD,
-    ETCHING_SATURATION_THICKNESS, ETCHING_BASE_SPIN_DECAY
+    ETCHING_IMPINGEMENT_TIME, ETCHING_IMPINGEMENT_BONUS,
+    ETCHING_GEO_SMOOTHING, ETCHING_SATURATION_THRESHOLD
 )
 
-# --- [新增] Numba 核心 1: 粒子塗抹 (Deposition) ---
+# --- [新增] Numba 加速核心函數 (放在 Class 外面) ---
 @njit(fastmath=True, cache=True)
-def _numba_deposit_liquid(film_matrix, conc_matrix, center_x, center_y, 
-                          radius, grid_size, dt, fresh_conc=1.0, 
-                          impingement_bonus=1.2):
+def _numba_apply_etch_kernel(matrix, center_x, center_y, contribution, radius, grid_size, geo_smoothing):
     """
-    粒子將液體塗抹到網格上，並進行濃度混合 (CSTR Model)。
+    Numba 加速版的蝕刻累加器。
+    完全對應原本 _apply_etched_contribution 的邏輯，但速度快 50-100 倍。
     """
     # 座標轉換：從 (-150, 150) 轉為 (0, 300)
     idx_x = center_x + 150.0
     idx_y = center_y + 150.0
     
-    # 計算邊界
+    # 計算邊界 (避免超出矩陣)
     r_pixel = int(math.ceil(radius))
     
+    # Numba 中使用 max/min 確保索引安全
     min_i = max(0, int(math.floor(idx_x - r_pixel)))
     max_i = min(grid_size - 1, int(math.ceil(idx_x + r_pixel)))
     min_j = max(0, int(math.floor(idx_y - r_pixel)))
@@ -36,100 +35,29 @@ def _numba_deposit_liquid(film_matrix, conc_matrix, center_x, center_y,
 
     radius_sq = radius * radius
     
-    # 定義單顆粒子在一個 dt 內攜帶的微量液體體積 (流量因子)
-    # 數值大小決定了網格從乾變濕的速度
-    particle_vol = impingement_bonus * dt 
-
+    # 雙層迴圈 (在 Numba 中這裡會被展開並向量化)
     for i in range(min_i, max_i + 1):
         for j in range(min_j, max_j + 1):
             dist_sq = (i - idx_x)**2 + (j - idx_y)**2
             
             if dist_sq <= radius_sq:
-                # 空間權重 (此處使用均勻權重，模擬液滴擴散)
-                # 若希望更平滑可改為高斯權重
-                weight = 1.0 
+                dist = math.sqrt(dist_sq)
+                # 1. 空間權重
+                spatial_weight = (radius - dist) / radius
+                # spatial_weight = 1
                 
-                added_vol = particle_vol * weight
+                # 2. 幾何稀釋 (Geometric Normalization)
+                # 轉回晶圓中心座標 (-150, 150) 來計算 r_wafer
+                x_wafer = i - 150.0
+                y_wafer = j - 150.0
+                r_wafer = math.sqrt(x_wafer**2 + y_wafer**2)
                 
-                # [核心邏輯] 濃度混合 (Volume Weighted Average)
-                # 新濃度 = (舊體積*舊濃度 + 新體積*新濃度) / 總體積
-                old_h = film_matrix[i, j]
-                old_c = conc_matrix[i, j]
+                # geo_factor = (r_wafer + geo_smoothing) / 150.0
+                # geo_factor = (r_wafer * r_wafer + geo_smoothing**2) / (150.0 * 150.0)
+                geo_factor = 1
                 
-                new_h = old_h + added_vol
-                
-                if new_h > 1e-6:
-                    new_c = (old_h * old_c + added_vol * fresh_conc) / new_h
-                    
-                    # 更新網格狀態
-                    film_matrix[i, j] = new_h
-                    conc_matrix[i, j] = new_c
-
-# --- [新增] Numba 核心 2: 網格演化 (Evolution) ---
-@njit(fastmath=True, parallel=True, cache=True)
-def _numba_evolve_grid(etch_matrix, film_matrix, conc_matrix, 
-                       dt, base_spin_decay, chem_decay_tau, 
-                       saturation_h, wafer_radius, 
-                       geo_smoothing, sat_threshold):
-    """
-    全網格演化：模擬物理甩乾、化學老化與蝕刻反應。
-    """
-    rows, cols = etch_matrix.shape
-    center_idx = 150.0
-    
-    # 預計算化學衰減因子 (每幀衰減比例)
-    chem_decay_factor = math.exp(-dt / chem_decay_tau)
-
-    for i in prange(rows):
-        for j in range(cols):
-            h = film_matrix[i, j]
-            
-            # 只有濕的地方才需要計算 (節省效能)
-            if h > 0.0001:
-                c = conc_matrix[i, j]
-                
-                # --- 1. 計算蝕刻反應 (Reaction) ---
-                # 飽和機制：tanh(h / sat_h)
-                # 當膜厚 h 超過 saturation_h，反應速率不再隨厚度增加 (Surface Reaction Limited)
-                # 這能有效防止中心因為積水過厚而導致蝕刻量無限暴增
-                saturation_factor = math.tanh(h / saturation_h)
-                
-                # 本幀蝕刻量 = 濃度 * 飽和因子 * 時間
-                delta_etch = c * saturation_factor * dt
-                
-                # [新增] 飽和門檻處理 (np.tanh 限制極端值)
-                if sat_threshold > 0:
-                    delta_etch = math.tanh(delta_etch / sat_threshold) * sat_threshold
-                
-                etch_matrix[i, j] += delta_etch
-                
-                # --- 2. 物理甩乾 (Spin-off) ---
-                # 計算該點離圓心的距離
-                dx = i - center_idx
-                dy = j - center_idx
-                r = math.sqrt(dx*dx + dy*dy)
-                
-                if r <= wafer_radius + 5.0:
-                    # 徑向甩乾模型：半徑越大，離心力越強，甩乾越快
-                    # r_factor 模擬邊緣的高離心力加速乾燥
-                    # 使用 geo_smoothing 調整徑向梯度 (預設 7.0 / 3.5 = 2.0)
-                    r_factor = 1.0 + (geo_smoothing / 3.5) * (r / wafer_radius)
-                    effective_decay = base_spin_decay * r_factor
-                    
-                    # 更新膜厚 (指數衰減)
-                    film_matrix[i, j] *= (1.0 - effective_decay * dt)
-                else:
-                    # 晶圓外直接乾掉
-                    film_matrix[i, j] = 0.0
-                
-                # --- 3. 化學老化 (Aging) ---
-                # 濃度隨時間自然降低 (模擬反應消耗)
-                conc_matrix[i, j] *= chem_decay_factor
-                
-            else:
-                # 如果乾了，重置狀態，避免殘留微小數值干擾運算
-                film_matrix[i, j] = 0.0
-                conc_matrix[i, j] = 0.0
+                # 3. 累加
+                matrix[i, j] += contribution * spatial_weight * geo_factor
 
 class EtchingAmountGenerator:
     def __init__(self, app_instance):
@@ -137,7 +65,7 @@ class EtchingAmountGenerator:
 
     def generate(self, recipe, filepath, config=None, progress_widgets=None):
         """
-        核心蝕刻量模擬邏輯 (雙層網格狀態機版)
+        核心蝕刻量模擬邏輯 (Numba 加速版)
         """
         # 合併配置
         if config is None:
@@ -145,10 +73,9 @@ class EtchingAmountGenerator:
             config = get_default_config()
 
         # 提取參數
-        etch_tau = config.get('ETCHING_TAU', ETCHING_TAU) # 用於化學老化
+        etch_tau = config.get('ETCHING_TAU', ETCHING_TAU)
         grid_radius = config.get('GRID_SIZE', GRID_SIZE)
-        sat_h = config.get('ETCHING_SATURATION_THICKNESS', ETCHING_SATURATION_THICKNESS)
-        base_spin_decay = config.get('ETCHING_BASE_SPIN_DECAY', ETCHING_BASE_SPIN_DECAY)
+        imp_time = config.get('ETCHING_IMPINGEMENT_TIME', ETCHING_IMPINGEMENT_TIME)
         imp_bonus = config.get('ETCHING_IMPINGEMENT_BONUS', ETCHING_IMPINGEMENT_BONUS)
         geo_smoothing = config.get('ETCHING_GEO_SMOOTHING', ETCHING_GEO_SMOOTHING)
         sat_threshold = config.get('ETCHING_SATURATION_THRESHOLD', ETCHING_SATURATION_THRESHOLD)
@@ -167,21 +94,16 @@ class EtchingAmountGenerator:
         # 2. 實例化引擎
         engine = SimulationEngine(recipe, headless_arms, water_params_dict, headless=True, config=config)
         
-        # 3. 初始化狀態矩陣 (300x300)
+        # 3. 準備蝕刻矩陣
         grid_size = 300
-        # 最終結果 (累積蝕刻量)
-        etch_matrix = np.zeros((grid_size, grid_size), dtype=np.float64)
-        # 液膜厚度矩陣 (記錄哪裡是濕的)
-        film_matrix = np.zeros((grid_size, grid_size), dtype=np.float64)
-        # 濃度矩陣 (記錄藥液新鮮度)
-        conc_matrix = np.zeros((grid_size, grid_size), dtype=np.float64)
+        etch_matrix = np.zeros((grid_size, grid_size), dtype=np.float64) # 明確指定型態
         
         report_fps = recipe.get('dynamic_report_fps', REPORT_FPS)
         dt = 1.0 / report_fps
         total_duration = sum(p['total_duration'] for p in recipe['processes'])
         sim_clock = 0.0
 
-        # 4. 執行模擬主迴圈
+        # 5. 執行模擬
         while True:
             snapshot = engine.update(dt) 
             sim_clock += dt
@@ -191,55 +113,69 @@ class EtchingAmountGenerator:
                     p_bar = progress_widgets['bar']
                     p_label = progress_widgets['label']
                     p_bar['value'] = min(sim_clock, total_duration)
-                    p_label.config(text=f"Etching (Film Model): {sim_clock:.1f}s / {total_duration:.1f}s")
+                    p_label.config(text=f"Etching Amount (Accelerated): {sim_clock:.1f}s / {total_duration:.1f}s")
                     progress_widgets['window'].update_idletasks()
                 except: pass
 
-            # --- A. 粒子塗抹 (Deposition) ---
-            # 粒子作為 "水源"，將新鮮藥液塗在網格上
+            # 初始化單步暫存矩陣
+            temp_step_matrix = np.zeros((grid_size, grid_size), dtype=np.float64)
+
+            # 暫時測試用參數
+            vel_coeff = 1
+            imp_decay_tau = 0.05
+
+            # 優化：直接從引擎的 NumPy 陣列提取 (現在引擎直接提供旋轉座標系下的座標)
             on_wafer_mask = engine.particles_state == 2 # P_ON_WAFER
             if np.any(on_wafer_mask):
                 indices = np.where(on_wafer_mask)[0]
                 current_time = engine.simulation_time_elapsed
                 
-                # 簡單計算粒子是否 "新鮮" (可選：過老的粒子濃度較低)
-                # 這裡暫時假設剛噴出來的粒子濃度都是 1.0 (fresh_conc)
-                # 老化由網格演化負責
-                
                 for i in indices:
-                    # 取得相對座標
+                    # 1. 取得相對座標
                     rel_x, rel_y = engine.particles_pos[i, 0], engine.particles_pos[i, 1]
                     
-                    # 呼叫 Numba 核心進行塗抹
-                    _numba_deposit_liquid(
-                        film_matrix, conc_matrix, 
+                    # 2. 計算流體與晶圓的「相對滑動速度」 (重要！)
+                    # 粒子相對於晶圓的滑動速度向量 (vx, vy)
+                    vx, vy = engine.particles_vel[i, 0], engine.particles_vel[i, 1]
+                    rel_speed = math.sqrt(vx**2 + vy**2)
+                    
+                    # [建議1實作] 速度依賴加成：模擬邊界層削薄 (Boundary Layer Thinning)
+                    # 使用平方根關係式，模擬流體力學常見的 Re^0.5 關係
+                    # velocity_factor = 1.0 + vel_coeff * math.sqrt(rel_speed)
+                    # velocity_factor = 1.0 + vel_coeff * rel_speed
+                    
+                    # 3. [建議2實作] 平滑衝擊加權 (Exponential Decay Impingement)
+                    tow = engine.particles_time_on_wafer[i]
+                    # 使用連續指數衰減取代原本的 if/else 硬切斷
+                    # imp_bonus 是倍率加成，例如 3 代表增加 200% 的能力
+                    smooth_imp_factor = 1.0 + (imp_bonus - 1.0) * math.exp(-tow / imp_time)
+                    
+                    # 4. 老化模型 (化學消耗)
+                    age = max(0.0, current_time - engine.particles_birth_time[i])
+                    chemical_potential = math.exp(-age / etch_tau)
+                    
+                    # 最終整合貢獻度
+                    base_contribution = chemical_potential * smooth_imp_factor * dt
+                        
+                    # 5. 呼叫 Numba 核心累加
+                    _numba_apply_etch_kernel(
+                        temp_step_matrix, 
                         rel_x, rel_y, 
-                        grid_radius, grid_size, dt, 
-                        fresh_conc=1.0,
-                        impingement_bonus=imp_bonus
+                        base_contribution, 
+                        grid_radius, 
+                        grid_size,
+                        geo_smoothing
                     )
 
-            # --- B. 網格演化 (Evolution) ---
-            # 計算全網格的反應、甩乾與老化
-            
-            # 動態調整甩乾率：轉速越快，甩越快
-            current_rpm = snapshot.get('rpm', 0)
-            # 經驗公式：轉速越高，基礎甩乾率越高
-            current_spin_decay = base_spin_decay * (1.0 + abs(current_rpm) / 500.0)
+            # 飽和度計算
+            if sat_threshold > 0:
+                np.tanh(temp_step_matrix / sat_threshold, out=temp_step_matrix)
+                temp_step_matrix *= sat_threshold
 
-            _numba_evolve_grid(
-                etch_matrix, film_matrix, conc_matrix,
-                dt, current_spin_decay, etch_tau,
-                sat_h, WAFER_RADIUS,
-                geo_smoothing, sat_threshold
-            )
+            etch_matrix += temp_step_matrix
 
             if snapshot.get('is_finished') or sim_clock > (total_duration + 10.0):
-                # 讓模擬多跑幾秒鐘，確保殘留在表面的液體完全反應/乾掉
-                if np.max(film_matrix) < 0.001 and snapshot.get('is_finished'):
-                     break
-                elif sim_clock > (total_duration + 10.0):
-                     break
+                break
 
         self._export_results(etch_matrix, filepath, config=config)
         return True
@@ -269,7 +205,7 @@ class EtchingAmountGenerator:
         wafer_circle = plt.Circle((0, 0), 150, color='red', fill=False, linestyle='--', alpha=0.5)
         plt.gca().add_artist(wafer_circle)
 
-        plt.title("Wafer Etching Amount (Film Model)", fontsize=14, pad=15)
+        plt.title("Wafer Etching Amount Distribution (Aging Model)", fontsize=14, pad=15)
         plt.xlabel("X Position (mm)")
         plt.ylabel("Y Position (mm)")
 
@@ -316,7 +252,7 @@ class EtchingAmountGenerator:
         # 2. 儲存 CSV
         try:
             np.savetxt(csv_path, data, delimiter=",", fmt='%.6f', 
-                       header="Etching Amount Data (Film Model), Resolution: 1.0mm/pixel, Range: -150 to 150 mm")
+                       header="Etching Amount Data (Aging Model), Resolution: 1.0mm/pixel, Range: -150 to 150 mm")
         except Exception as e:
             print(f"Failed to write CSV: {e}")
 

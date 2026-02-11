@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import messagebox, filedialog
 import os
+from simulation_config_def import get_default_config
 
 class RecipeManager:
     """
@@ -32,6 +33,11 @@ class RecipeManager:
                 f.write(f"viscosity = {self.app.viscosity_var.get()}\n")
                 f.write(f"surface_tension = {self.app.surface_tension_var.get()}\n")
                 f.write(f"evaporation_rate = {self.app.evaporation_rate_var.get()}\n")
+
+                # 匯出 Physics & System 參數
+                f.write("\n[PHYSICS_SYSTEM]\n")
+                for key, var in self.app.config_vars.items():
+                    f.write(f"{key} = {var.get()}\n")
 
                 f.write("\n")
 
@@ -86,11 +92,12 @@ class RecipeManager:
                 if not line or line.startswith('#'): continue
                 if line.startswith('[') and line.endswith(']'):
                     section = line[1:-1]
-                    if section == 'GLOBAL':
-                        current_process_dict = None
-                    elif section.startswith('PROCESS_'):
+                    if section.startswith('PROCESS_'):
                         current_process_dict = {'steps_data': {}}
                         imported_processes.append(current_process_dict)
+                    else:
+                        # 非 Process 區段（如 GLOBAL, PHYSICS_SYSTEM）皆視為全域
+                        current_process_dict = None
                     continue
                 
                 if '=' not in line: continue
@@ -119,6 +126,14 @@ class RecipeManager:
             if 'viscosity' in global_params: self.app.viscosity_var.set(global_params['viscosity'])
             if 'surface_tension' in global_params: self.app.surface_tension_var.set(global_params['surface_tension'])
             if 'evaporation_rate' in global_params: self.app.evaporation_rate_var.set(global_params['evaporation_rate'])
+
+            # 更新 Physics & System 變數 (處理舊版本相容性：若 Recipe 缺項則套用預設值)
+            default_config = get_default_config()
+            for key, var in self.app.config_vars.items():
+                if key in global_params:
+                    var.set(global_params[key])
+                else:
+                    var.set(str(default_config.get(key, '')))
 
             num_proc = len(imported_processes)
             if num_proc == 0: raise ValueError("No processes found.")
