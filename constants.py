@@ -10,7 +10,7 @@ REPORT_FPS = 800  # 目前已根據 recipe 動態調整，這個只是預設最�
 NOTCH_DEPTH = 15
 NOTCH_HALF_WIDTH = 7.5
 
-# Simulation Report 參數
+# Simulation Report 參數 (Moved to simulation_config_def.py)
 REPORT_INTERVAL_MM = 2
 
 # --- Simulation Density Parameters ---

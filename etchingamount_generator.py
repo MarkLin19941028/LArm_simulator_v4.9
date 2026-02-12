@@ -135,7 +135,7 @@ class EtchingAmountGenerator:
     def __init__(self, app_instance):
         self.app = app_instance
 
-    def generate(self, recipe, filepath, config=None, progress_widgets=None):
+    def generate(self, recipe, filepath, config=None, progress_widgets=None, play_speed_multiplier=1.0):
         """
         核心蝕刻量模擬邏輯 (雙層網格狀態機版)
         """
@@ -175,25 +175,46 @@ class EtchingAmountGenerator:
         film_matrix = np.zeros((grid_size, grid_size), dtype=np.float64)
         # 濃度矩陣 (記錄藥液新鮮度)
         conc_matrix = np.zeros((grid_size, grid_size), dtype=np.float64)
+
+        # 影片同步設定 (解決動態 dt 問題)
+        VIDEO_FPS = 30.0
+        # 根據播放倍率調整錄製間隔。若 multiplier < 1.0，則間隔變小，產生的幀數變多，從而實現慢動作。
+        record_interval = (1.0 / VIDEO_FPS) * play_speed_multiplier
+        next_record_time = 0.0
+        video_buffer = []
         
         report_fps = recipe.get('dynamic_report_fps', REPORT_FPS)
         dt = 1.0 / report_fps
         total_duration = sum(p['total_duration'] for p in recipe['processes'])
         sim_clock = 0.0
+        import time
+        last_ui_update_time = time.time()
 
         # 4. 執行模擬主迴圈
         while True:
             snapshot = engine.update(dt) 
             sim_clock += dt
+
+            # 影片緩存記錄
+            if sim_clock >= next_record_time:
+                video_buffer.append({
+                    'etch': etch_matrix.copy(), 
+                    'film': film_matrix.copy(), 
+                    'time': sim_clock
+                })
+                next_record_time += record_interval
             
             if progress_widgets:
-                try:
-                    p_bar = progress_widgets['bar']
-                    p_label = progress_widgets['label']
-                    p_bar['value'] = min(sim_clock, total_duration)
-                    p_label.config(text=f"Etching (Film Model): {sim_clock:.1f}s / {total_duration:.1f}s")
-                    progress_widgets['window'].update_idletasks()
-                except: pass
+                # FPS = 每 0.5 秒更新一次 UI
+                if time.time() - last_ui_update_time >= 0.5:
+                    try:
+                        p_bar = progress_widgets['bar']
+                        p_label = progress_widgets['label']
+                        p_bar['value'] = min(sim_clock, total_duration)
+                        p_label.config(text=f"Etching (Film Model): {sim_clock:.1f}s / {total_duration:.1f}s")
+                        progress_widgets['window'].update_idletasks()
+                        last_ui_update_time = time.time()
+                    except: pass
 
             # --- A. 粒子塗抹 (Deposition) ---
             # 粒子作為 "水源"，將新鮮藥液塗在網格上
@@ -234,15 +255,62 @@ class EtchingAmountGenerator:
                 geo_smoothing, sat_threshold
             )
 
-            if snapshot.get('is_finished') or sim_clock > (total_duration + 10.0):
+            if snapshot.get('is_finished') or sim_clock > (total_duration + 3.0):
                 # 讓模擬多跑幾秒鐘，確保殘留在表面的液體完全反應/乾掉
                 if np.max(film_matrix) < 0.001 and snapshot.get('is_finished'):
                      break
-                elif sim_clock > (total_duration + 10.0):
+                elif sim_clock > (total_duration + 3.0):
                      break
 
         self._export_results(etch_matrix, filepath, config=config)
+        
+        # 影片輸出
+        video_path = filepath.replace(".png", "_DualView.mp4")
+        self._export_dual_view_video(video_buffer, video_path, 
+                                     max_etch=np.max(etch_matrix) if np.max(etch_matrix) > 0 else 1.0, 
+                                     sat_h=sat_h, fps=VIDEO_FPS)
         return True
+
+    def _export_dual_view_video(self, video_buffer, output_path, max_etch, sat_h, fps=30.0):
+        import cv2
+        if not video_buffer: return
+
+        view_size = 800 
+        frame_size = (view_size * 2, view_size)
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(output_path, fourcc, fps, frame_size)
+
+        mask = np.zeros((view_size, view_size), dtype=np.uint8)
+        cv2.circle(mask, (view_size//2, view_size//2), view_size//2, 255, -1)
+
+        print(f"Exporting video with Per-Frame Normalization for Liquid Film...")
+        
+        for frame_data in video_buffer:
+            # --- 左圖：累積蝕刻 (維持最終最大值歸一化，觀察生長過程) ---
+            etch_raw = frame_data['etch'].T
+            etch_norm = (np.clip(etch_raw / max_etch, 0, 1) * 255).astype(np.uint8)
+            etch_view = cv2.applyColorMap(etch_norm, cv2.COLORMAP_VIRIDIS)
+            etch_view = cv2.resize(etch_view, (view_size, view_size), interpolation=cv2.INTER_NEAREST)
+            etch_view = cv2.bitwise_and(etch_view, etch_view, mask=mask)
+
+            # --- 右圖：動態液膜 (改為「逐幀最大值」歸一化) ---
+            film_raw = frame_data['film'].T
+            
+            # [核心修改]：計算當前幀的最大值
+            current_max_film = np.max(film_raw)
+            # 設定視覺下限，避免全黑畫面時除以零
+            norm_base = max(current_max_film, 0.01) 
+            
+            # 這樣每一幀都會重新拉伸亮度範圍
+            film_norm = (np.clip(film_raw / norm_base, 0, 1) * 255).astype(np.uint8)
+            film_view = cv2.applyColorMap(film_norm, cv2.COLORMAP_OCEAN)
+            film_view = cv2.resize(film_view, (view_size, view_size), interpolation=cv2.INTER_NEAREST)
+            film_view = cv2.bitwise_and(film_view, film_view, mask=mask)
+
+            # 拼接並寫入
+            out.write(np.hstack((etch_view, film_view)))
+
+        out.release()
 
     def _export_results(self, matrix, filepath, config=None):
         base_path, _ = os.path.splitext(filepath)

@@ -93,7 +93,11 @@ class VideoGenerator:
         
         # 配方總長度 (僅供 UI 進度條參考)
         recipe_net_duration = sum(p['total_duration'] for p in recipe['processes'])
-        
+        last_ui_update_time = 0.0 # 使用 time.time() 會需要 import time，這裡我們看 video_generator.py 有沒有 import time
+
+        import time
+        last_ui_update_time = time.time()
+
         while True:
             snapshot = engine.update(dt)
             sim_clock += dt
@@ -138,15 +142,18 @@ class VideoGenerator:
 
             # UI 進度
             if progress_widgets:
-                try:
-                    p_bar, p_label = progress_widgets['bar'], progress_widgets['label']
-                    # 預估總時長包含 10s 機械動作緩衝
-                    est_total = recipe_net_duration + 10.0
-                    p_bar['maximum'] = est_total
-                    p_bar['value'] = min(snapshot['time'], est_total)
-                    p_label.config(text=f"Exporting Video: {snapshot['time']:.1f}s / (Simulating...)")
-                    progress_widgets['window'].update_idletasks()
-                except: pass
+                # FPS = 每 0.5 秒更新一次 UI
+                if time.time() - last_ui_update_time >= 0.5 or snapshot.get('is_finished'):
+                    try:
+                        p_bar, p_label = progress_widgets['bar'], progress_widgets['label']
+                        # 預估總時長包含 10s 機械動作緩衝
+                        est_total = recipe_net_duration + 10.0
+                        p_bar['maximum'] = est_total
+                        p_bar['value'] = min(snapshot['time'], est_total)
+                        p_label.config(text=f"Exporting Video: {snapshot['time']:.1f}s / (Simulating...)")
+                        progress_widgets['window'].update_idletasks()
+                        last_ui_update_time = time.time()
+                    except: pass
                 
             # 檢查結束時機 (當最後一幀已繪製完成後)
             if snapshot.get('is_finished'):

@@ -79,6 +79,8 @@ class AccuHeatmapGenerator:
         dt = 1.0 / report_fps
         total_duration = sum(p['total_duration'] for p in recipe['processes'])
         sim_clock = 0.0
+        import time
+        last_ui_update_time = time.time()
 
         # 定義範圍常數
         RANGE_MIN = -150.0
@@ -91,15 +93,17 @@ class AccuHeatmapGenerator:
             snapshot = engine.update(dt) 
             sim_clock += dt
             
-            # 更新 UI (降低更新頻率以減少開銷，例如每 0.1 秒更新一次)
-            if progress_widgets and int(sim_clock * 10) % 5 == 0: 
-                try:
-                    p_bar = progress_widgets['bar']
-                    p_label = progress_widgets['label']
-                    p_bar['value'] = min(sim_clock, total_duration)
-                    p_label.config(text=f"Generating Heatmap: {sim_clock:.1f}s / {total_duration:.1f}s")
-                    progress_widgets['window'].update_idletasks()
-                except: pass
+            # 更新 UI (FPS = 每 0.5 秒更新一次 UI)
+            if progress_widgets: 
+                if time.time() - last_ui_update_time >= 0.5:
+                    try:
+                        p_bar = progress_widgets['bar']
+                        p_label = progress_widgets['label']
+                        p_bar['value'] = min(sim_clock, total_duration)
+                        p_label.config(text=f"Generating Heatmap: {sim_clock:.1f}s / {total_duration:.1f}s")
+                        progress_widgets['window'].update_idletasks()
+                        last_ui_update_time = time.time()
+                    except: pass
 
             # --- 優化區塊開始 ---
             

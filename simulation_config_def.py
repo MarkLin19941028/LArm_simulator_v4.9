@@ -3,10 +3,12 @@
 # 變數類型: 'float', 'int'
 
 PARAMETER_DEFINITIONS = {
-    "Timing & Speed": {
+    "General": {
         "TRANSITION_ARM_SPEED_RATIO": ("Trans. Speed Ratio", 0.8, 'float', (0.1, 2.0), "Arm 不噴灑時移動的速度(相對最快速度）"),
         "ARM_CHANGE_PAUSE_TIME":      ("Arm Change Pause (s)", 1.0, 'float', (0.0, 10.0), "Arm 切換之間的停頓時間 (s)"),
         "CENTER_PAUSE_TIME":          ("Center Pause (s)", 0.8, 'float', (0.0, 10.0), "Arm 抵達晶圓中心後停頓的時間 (s)"),
+        "REPORT_INTERVAL_MM":         ("Report Interval (mm)", 2.0, 'float', (0.1, 50.0), "Simulation Report 徑向間隔 (mm)"),
+        "REPORT_LOG_INTERVAL":        ("Report Log Interval (s)", 0.01, 'float', (0.001, 5.0), "Simulation Report 時間記錄間隔 (s)"),
     },
     "Etching Amount": {
         "GRID_SIZE":                  ("Grid Size (radius)", 5.0, 'float', (0.0000001, 150.0), "單個粒子的影響半徑 (mm)。影響渲染的解析度與路徑平滑度。"),

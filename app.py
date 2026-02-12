@@ -585,7 +585,7 @@ class SimulationApp:
                 play_speed_multiplier=current_multiplier,
                 config=current_config
             )
-            messagebox.showinfo("Success", f"Simulation video exported successfully to:\n{filepath}")
+            messagebox.showinfo("Success", f"Video exported successfully to:\n{filepath}")
         except Exception as e:
             messagebox.showerror("Error", f"An error occurred during video generation: {e}")
         finally:
@@ -653,7 +653,7 @@ class SimulationApp:
                         writer = csv.DictWriter(csvfile, fieldnames=report_data[0].keys())
                         writer.writeheader()
                         writer.writerows(report_data)
-                    messagebox.showinfo("Success", f"Simulation report exported successfully to:\n{filepath}")
+                    # messagebox.showinfo("Success", f"Simulation report exported successfully to:\n{filepath}")
                 except Exception as e:
                     messagebox.showerror("Export Error", f"Failed to write simulation report to file: {e}")
                     
@@ -678,7 +678,7 @@ class SimulationApp:
                             writer = csv.DictWriter(csvfile, fieldnames=headers)
                             writer.writeheader()
                             writer.writerows(processed_particle_data)
-                    messagebox.showinfo("Success", f"Particle calculation report also exported successfully to:\n{particle_filepath}")
+                    messagebox.showinfo("Success", f"Report exported successfully to:\n{particle_filepath}")
                 except Exception as e:
                     messagebox.showerror("Export Error", f"Failed to write particle report to file: {e}")
 
@@ -739,15 +739,25 @@ class SimulationApp:
             progress_bar.pack(pady=10)
             progress_widgets = {'window': progress_window, 'bar': progress_bar, 'label': progress_label}
 
+            try:
+                current_multiplier = float(self.speed_var.get().replace('x', ''))
+            except (AttributeError, ValueError):
+                current_multiplier = 1.0
+
             current_config = self.get_current_config()
             generator = EtchingAmountGenerator(self)
-            success = generator.generate(parsed_recipe, filepath, config=current_config, progress_widgets=progress_widgets)
+            success = generator.generate(
+                parsed_recipe, filepath, 
+                config=current_config, 
+                progress_widgets=progress_widgets,
+                play_speed_multiplier=current_multiplier
+            )
 
             if progress_window.winfo_exists():
                 progress_window.destroy()
 
             if success:
-                messagebox.showinfo("Success", f"Etching Amount PNG and Raw Data CSV exported successfully.")
+                messagebox.showinfo("Success", f"Etching Amount exported successfully.")
 
         except Exception as e:
             messagebox.showerror("Etching Error", f"Failed during etching amount generation: {e}")
@@ -814,7 +824,7 @@ class SimulationApp:
                 progress_window.destroy()
 
             if success:
-                messagebox.showinfo("Success", f"Cleaning Dose PNG and Raw Data CSV exported successfully.")
+                messagebox.showinfo("Success", f"Cleaning Dose exported successfully.")
 
         except Exception as e:
             messagebox.showerror("Dose Error", f"Failed during cleaning dose generation: {e}")
@@ -914,7 +924,7 @@ class SimulationApp:
             if success:
                 # 提示成功，列出產生的檔案類型
                 messagebox.showinfo("Success", 
-                    f"Accumulation Heatmap sequence exported successfully:\n\n"
+                    f"Accumulation Heatmap exported successfully:\n\n"
                     f"1. Heatmap PNG (Quantitative)\n"
                     f"2. Radial Distribution Plot\n"
                     f"3. Raw Data CSV (Residence Time)")
@@ -970,7 +980,7 @@ class SimulationApp:
 
         try:
             self._run_headless_pattern_generation(parsed_recipe, filepath, progress_widgets)
-            messagebox.showinfo("Success", f"Moving Pattern image exported successfully to:\n{filepath}")
+            messagebox.showinfo("Success", f"Moving Pattern exported successfully to:\n{filepath}")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to generate pattern: {e}")
         finally:
@@ -1004,17 +1014,21 @@ class SimulationApp:
 
         last_active_id = None
         last_was_spraying = False
+        last_ui_update_time = time.time()
 
         while True:
             snapshot = engine.update(dt)
             if progress_widgets:
-                try:
-                    p_bar, p_label = progress_widgets['bar'], progress_widgets['label']
-                    p_bar['value'] = min(snapshot['time'], total_duration)
-                    percent = (min(snapshot['time'], total_duration) / total_duration) * 100
-                    p_label.config(text=f"Processing Pattern: {snapshot['time']:.1f}s / {total_duration:.1f}s ({percent:.0f}%)")
-                    progress_widgets['window'].update_idletasks()
-                except: pass
+                # FPS = 每 0.5 秒更新一次 UI
+                if time.time() - last_ui_update_time >= 0.5:
+                    try:
+                        p_bar, p_label = progress_widgets['bar'], progress_widgets['label']
+                        p_bar['value'] = min(snapshot['time'], total_duration)
+                        percent = (min(snapshot['time'], total_duration) / total_duration) * 100
+                        p_label.config(text=f"Processing Pattern: {snapshot['time']:.1f}s / {total_duration:.1f}s ({percent:.0f}%)")
+                        progress_widgets['window'].update_idletasks()
+                        last_ui_update_time = time.time()
+                    except: pass
 
             curr_arm_id = snapshot['active_arm_id']
             curr_spraying = snapshot['is_spraying']
@@ -1069,10 +1083,14 @@ class SimulationApp:
        
         report_fps = recipe.get('dynamic_report_fps', REPORT_FPS)
         dt = 1.0 / report_fps
-        report_log_interval = 0.01 
+        
+        # 使用使用者自定義的記錄間隔
+        report_log_interval = current_config.get('REPORT_LOG_INTERVAL', 0.01)
+        
         time_since_last_log = 0.0
         total_duration = sum(p['total_duration'] for p in recipe['processes'])
         sim_clock = 0.0
+        last_ui_update_time = time.time()
 
         while True:
             snapshot = engine.update(dt)
@@ -1094,19 +1112,25 @@ class SimulationApp:
             if time_since_last_log >= report_log_interval or is_finished:
                 time_since_last_log = 0.0
                 if progress_widgets:
-                    try:
-                        p_bar, p_label = progress_widgets['bar'], progress_widgets['label']
-                        p_bar['value'] = min(sim_clock, p_bar['maximum'])
-                        p_label.config(text=f"Processing Report: {snapshot['time']:.1f}s / (Simulating...)")
-                        progress_widgets['window'].update_idletasks()
-                    except: pass
+                    # 0.5 FPS = 每 2.0 秒更新一次 UI
+                    if time.time() - last_ui_update_time >= 0.5 or is_finished:
+                        try:
+                            p_bar, p_label = progress_widgets['bar'], progress_widgets['label']
+                            p_bar['value'] = min(sim_clock, p_bar['maximum'])
+                            p_label.config(text=f"Processing Report: {snapshot['time']:.1f}s / (Simulating...)")
+                            progress_widgets['window'].update_idletasks()
+                            last_ui_update_time = time.time()
+                        except: pass
 
                 nozzle_pos = snapshot['nozzle_pos']
                 # 優化：直接從 NumPy 陣列過濾在晶圓上的粒子座標
                 on_wafer_mask = engine.particles_state == 2 # P_ON_WAFER
                 all_on_wafer_coords = engine.particles_pos[on_wafer_mask, :2]
 
-                radial_counts = calculate_water_counts_by_radius(all_on_wafer_coords, WAFER_RADIUS, REPORT_INTERVAL_MM)
+                # 使用使用者自定義的徑向間隔
+                radial_interval = current_config.get('REPORT_INTERVAL_MM', 2.0)
+                radial_counts = calculate_water_counts_by_radius(all_on_wafer_coords, WAFER_RADIUS, radial_interval)
+                
                 nozzle_r = np.linalg.norm(nozzle_pos) if snapshot['active_arm_id'] != 0 else 0.0
 
                 row_data = {

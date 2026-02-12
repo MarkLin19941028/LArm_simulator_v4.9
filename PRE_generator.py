@@ -94,19 +94,24 @@ class PREGenerator:
         dt = 1.0 / report_fps
         total_duration = sum(p['total_duration'] for p in recipe['processes'])
         sim_clock = 0.0
+        import time
+        last_ui_update_time = time.time()
 
         while True:
             snapshot = engine.update(dt) 
             sim_clock += dt
             
             if progress_widgets:
-                try:
-                    p_bar = progress_widgets['bar']
-                    p_label = progress_widgets['label']
-                    p_bar['value'] = min(sim_clock, total_duration)
-                    p_label.config(text=f"Dose Simulation (Accelerated): {sim_clock:.1f}s / {total_duration:.1f}s")
-                    progress_widgets['window'].update_idletasks()
-                except: pass
+                # FPS = 每 0.5 秒更新一次 UI
+                if time.time() - last_ui_update_time >= 0.5:
+                    try:
+                        p_bar = progress_widgets['bar']
+                        p_label = progress_widgets['label']
+                        p_bar['value'] = min(sim_clock, total_duration)
+                        p_label.config(text=f"Dose Simulation (Accelerated): {sim_clock:.1f}s / {total_duration:.1f}s")
+                        progress_widgets['window'].update_idletasks()
+                        last_ui_update_time = time.time()
+                    except: pass
 
             current_proc = recipe['processes'][snapshot['process_idx']]
             q_actual = current_proc.get('flow_rate', pre_q_ref)
