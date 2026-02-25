@@ -27,6 +27,7 @@ from video_generator import VideoGenerator
 from etchingamount_generator import EtchingAmountGenerator
 from accu_heatmap_generator import AccuHeatmapGenerator
 from PRE_generator import PREGenerator
+from charging_generator import ChargingGenerator
 from simulation_config_def import PARAMETER_DEFINITIONS, get_default_config
 
 class WaterColumn:
@@ -345,6 +346,7 @@ class SimulationApp:
         ttk.Button(report_frame, text="Accumulation Heatmap", command=self.export_accumulation_heatmap).grid(row=1, column=0, padx=5, pady=2, sticky="ew")
         ttk.Button(report_frame, text="Etching Amount", command=self.export_etching_amount).grid(row=1, column=1, padx=5, pady=2, sticky="ew")
         ttk.Button(report_frame, text="Particle Removal", command=self.export_pre_efficiency).grid(row=1, column=2, padx=5, pady=2, sticky="ew")
+        ttk.Button(report_frame, text="Charging", command=self.export_charging_simulation).grid(row=1, column=3, padx=5, pady=2, sticky="ew")
         global_frame = ttk.LabelFrame(content_frame, text="Global Parameters", padding="10")
         global_frame.grid(row=2, column=0, sticky=(tk.W, tk.E), padx=5, pady=5)
         ttk.Label(global_frame, text="Wafer Spin Direction:").grid(row=0, column=0, sticky=tk.W, pady=2)
@@ -945,6 +947,83 @@ class SimulationApp:
                 progress_window.destroy()
         finally:
             self._heatmap_export_lock = False
+
+    def export_charging_simulation(self):
+        if getattr(self, '_charging_export_lock', False):
+            return
+        self._charging_export_lock = True
+
+        try:
+            parsed_recipe = self.parse_and_prepare_recipe()
+            if not parsed_recipe:
+                self._charging_export_lock = False
+                return
+
+            user_path = filedialog.asksaveasfilename(
+                defaultextension=".png",
+                filetypes=[("PNG Files", "*.png"), ("All Files", "*.*")],
+                title="Export Charging Simulation As..."
+            )
+            if not user_path:
+                self._charging_export_lock = False
+                return
+
+            # 套用命名規範
+            base_path, ext = os.path.splitext(user_path)
+            filepath = f"{base_path}_Charging{ext}"
+
+            max_rpm = 0
+            for proc in parsed_recipe['processes']:
+                spin = proc['spin_params']
+                current_max = spin['rpm'] if spin['mode'] == 'Simple' else max(spin['start_rpm'], spin['end_rpm'])
+                if current_max > max_rpm: max_rpm = current_max
+            
+            suggested_fps = max(800, int(max_rpm * 4))
+            parsed_recipe['dynamic_report_fps'] = suggested_fps
+
+            progress_window = tk.Toplevel(self.root)
+            progress_window.title("Generating Charging Simulation")
+            progress_window.geometry("400x120")
+            progress_window.transient(self.root)
+            progress_window.grab_set()
+            progress_window.resizable(False, False)
+            ttk.Label(progress_window, text="Generating charging accumulation map, please wait...", padding=10).pack()
+
+            total_duration = sum(p['total_duration'] for p in parsed_recipe['processes'])
+            if total_duration <= 0: total_duration = 1.0
+            
+            progress_label = ttk.Label(progress_window, text=f"Processing: 0.0s / {total_duration:.1f}s (0%)", padding=(0, 5))
+            progress_label.pack()
+            progress_bar = ttk.Progressbar(progress_window, orient="horizontal", length=350, mode="determinate", maximum=total_duration)
+            progress_bar.pack(pady=10)
+            progress_widgets = {'window': progress_window, 'bar': progress_bar, 'label': progress_label}
+
+            current_config = self.get_current_config()
+            generator = ChargingGenerator(self)
+            try:
+                current_multiplier = float(self.speed_var.get().replace('x', ''))
+            except (AttributeError, ValueError):
+                current_multiplier = 1.0
+
+            success = generator.generate(
+                parsed_recipe, filepath, 
+                config=current_config, 
+                progress_widgets=progress_widgets,
+                play_speed_multiplier=current_multiplier
+            )
+
+            if progress_window.winfo_exists():
+                progress_window.destroy()
+
+            if success:
+                messagebox.showinfo("Success", f"Charging Simulation exported successfully.")
+
+        except Exception as e:
+            messagebox.showerror("Charging Error", f"Failed during charging simulation generation: {e}")
+            if 'progress_window' in locals() and progress_window.winfo_exists():
+                progress_window.destroy()
+        finally:
+            self._charging_export_lock = False
 
     def export_nozzle_pattern(self):
         parsed_recipe = self.parse_and_prepare_recipe()

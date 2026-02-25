@@ -61,6 +61,12 @@ ETCHING_SATURATION_THRESHOLD = 0.002 # 每一步長單個像素點的最大蝕�
 ETCHING_SATURATION_THICKNESS = 0.2   # 飽和膜厚 (mm)
 ETCHING_BASE_SPIN_DECAY = 2.0        # 基礎甩乾速率 (1/s)
 
+# --- Charging Simulation Constants ---
+VACUUM_PERMITTIVITY = 8.854e-12  # F/m (真空介電常數)
+WATER_RELATIVE_PERMITTIVITY = 80.0 # 相對介電常數 (水)
+DEFAULT_CONDUCTIVITY = 5.0e-6    # S/m (Siemens per meter)
+CHARGING_BASE_SPIN_DECAY = 2.0        # 基礎甩乾速率 (1/s)
+
 # --- PRE (Particle Removal Efficiency) Constants ---
 PRE_ALPHA = 0.001               # 剪切項係數
 PRE_BETA = 0.5                    # 衝擊項保底係數

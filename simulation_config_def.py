@@ -26,6 +26,12 @@ PARAMETER_DEFINITIONS = {
         "PRE_Q_REF":                  ("Q Ref (mL/min)", 1000.0, 'float', (100.0, 5000.0), "參考流量 (mL/min)"),
         "PRE_GAMMA_BASE":             ("Gamma Base", 0.001, 'float', (0.0, 1.0), "基礎再附著係數 (1/mm)"),
     },
+    "Charging Simulation": {
+        "FLUID_CONDUCTIVITY":         ("Conductivity (S/m)", 5.0e-09, 'float', (1.0e-16, 10.0), "藥液導電率 (S/m)。DIW 約 5e-6，化學液約 1.0。"),
+        "FLUID_RELATIVE_PERMITTIVITY":("Rel. Permittivity", 80.0, 'float', (1.0, 100.0), "相對介電常數。水約為 80。"),
+        "CHARGING_EFFICIENCY":        ("Charging Efficiency", -5.0e-5, 'float', (-1.0, 1.0), "電荷產生效率經驗係數。"),
+        "CHARGING_BASE_SPIN_DECAY":    ("Base Spin Decay", 2.0, 'float', (0.00000001, 10.0), "基礎甩乾速率。模擬液體因旋轉與蒸發離開表面的速度。"),
+    },
     "Advanced Physics Parameters": {
         "PHYSICS_PRESSURE_PUSH_STRENGTH": ("Pressure Push", 5.0, 'float', (0.0, 5000.0), "中心區域推力強度 (解決中心堆積)"),
         "PHYSICS_PRESSURE_CORE_RADIUS":   ("Core Radius (mm)", 80.0, 'float', (1.0, 150.0), "中心推力影響半徑 (mm)"),
