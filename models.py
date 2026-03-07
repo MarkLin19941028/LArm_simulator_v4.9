@@ -1,15 +1,9 @@
 import math
 import numpy as np
 
-# 嘗試導入常數，如果失敗則使用預設值 (避免單獨測試時報錯)
-try:
-    from constants import MAX_NOZZLE_SPEED_MMS
-except ImportError:
-    MAX_NOZZLE_SPEED_MMS = 250.0
-
 class DispenseArm:
     def __init__(self, arm_id, pivot, home, length, p_start, p_end,
-                 arm_artist=None, nozzle_artist=None):
+                 arm_artist=None, nozzle_artist=None, max_nozzle_speed_mms=250.0):
         self.id = arm_id
         # 強制轉為 float numpy array，避免數據類型混亂
         self.pivot_pos = np.array(pivot, dtype=float)
@@ -41,9 +35,13 @@ class DispenseArm:
         self.center_pos_percent = (ratio * 200) - 100
 
         # 計算最大速度百分比 (用於物理計算)
+        self.update_max_speed(max_nozzle_speed_mms)
+
+    def update_max_speed(self, new_max_speed_mms):
+        """動態更新手臂的最大百分比速度 (用於物理運算與 UI 同步)"""
         angle_diff = self._get_angle_diff(self.theta_end, self.theta_start)
         arc_length = self.arm_length * abs(angle_diff)
-        self.max_percent_speed = (MAX_NOZZLE_SPEED_MMS / arc_length) * 200 if arc_length > 0 else 0
+        self.max_percent_speed = (new_max_speed_mms / arc_length) * 200 if arc_length > 0 else 0
 
     def _get_angle_diff(self, a1, a2):
         """計算兩個角度之間的最小差值 (-pi 到 pi)"""

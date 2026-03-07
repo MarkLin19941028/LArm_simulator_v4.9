@@ -185,6 +185,7 @@ class SimulationEngine:
         self.config = config if config else {}
 
         self.simulation_mode = self.config.get('SIMULATION_MODE', 'full')
+        self.max_nozzle_speed_mms = self.config.get('MAX_NOZZLE_SPEED_MMS', 250.0)
         self.transition_arm_speed_ratio = self.config.get('TRANSITION_ARM_SPEED_RATIO', TRANSITION_ARM_SPEED_RATIO)
         self.arm_change_pause_time = self.config.get('ARM_CHANGE_PAUSE_TIME', ARM_CHANGE_PAUSE_TIME)
         self.center_pause_time = self.config.get('CENTER_PAUSE_TIME', CENTER_PAUSE_TIME)
@@ -383,7 +384,7 @@ class SimulationEngine:
                 if arm:
                     angle_diff = arm._get_angle_diff(self.transition_end_angle, self.transition_start_angle)
                     dist_arc = abs(angle_diff) * arm.arm_length
-                    dur = max(0.05, dist_arc / (MAX_NOZZLE_SPEED_MMS * self.transition_arm_speed_ratio))
+                    dur = max(0.05, dist_arc / (self.max_nozzle_speed_mms * self.transition_arm_speed_ratio))
                     if (self.simulation_time_elapsed - self.transition_start_time) >= dur:
                         is_finished = True
                 else:
@@ -587,7 +588,7 @@ class SimulationEngine:
         
         angle_diff = arm._get_angle_diff(self.transition_end_angle, self.transition_start_angle)
         dist_arc = abs(angle_diff) * arm.arm_length
-        dur = max(0.05, dist_arc / (MAX_NOZZLE_SPEED_MMS * self.transition_arm_speed_ratio))
+        dur = max(0.05, dist_arc / (self.max_nozzle_speed_mms * self.transition_arm_speed_ratio))
         
         t = self.simulation_time_elapsed - self.transition_start_time
         

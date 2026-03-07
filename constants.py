@@ -3,7 +3,6 @@ import numpy as np
 # --- Constants ---
 WAFER_DIAMETER = 300
 WAFER_RADIUS = WAFER_DIAMETER / 2
-MAX_NOZZLE_SPEED_MMS = 250
 CHAMBER_SIZE = 450
 FPS = 30
 REPORT_FPS = 800  # 目前已根據 recipe 動態調整，這個只是預設最低數值

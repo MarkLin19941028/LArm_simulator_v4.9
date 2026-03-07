@@ -2,6 +2,7 @@ import numpy as np
 import math
 import os
 import matplotlib.pyplot as plt
+import tkinter as tk
 from tkinter import messagebox
 from numba import jit
 
@@ -79,8 +80,17 @@ class AccuHeatmapGenerator:
         dt = 1.0 / report_fps
         total_duration = sum(p['total_duration'] for p in recipe['processes'])
         sim_clock = 0.0
-        import time
-        last_ui_update_time = time.time()
+
+        # 新增：控制進度條顯示更新的頻率 (例如每 0.5 秒更新一次進度條上的文字 and 百分比)
+        progress_display_interval = 0.5
+        last_progress_display_time = 0.0 # 上次更新進度條顯示的時間
+
+        # 新增：在循環開始前，為 JIT 編譯提供提示，並強制刷新 GUI
+        if progress_widgets:
+            progress_widgets['label'].config(text="Initializing JIT Engine for Heatmap (first run might be slow)...")
+            # 確保 progress_widgets['bar'] 的最大值已經設定
+            progress_widgets['bar']['maximum'] = total_duration
+            progress_widgets['window'].update_idletasks() # 強制刷新 GUI
 
         # 定義範圍常數
         RANGE_MIN = -150.0
@@ -93,17 +103,29 @@ class AccuHeatmapGenerator:
             snapshot = engine.update(dt) 
             sim_clock += dt
             
-            # 更新 UI (FPS = 每 0.5 秒更新一次 UI)
-            if progress_widgets: 
-                if time.time() - last_ui_update_time >= 0.5:
+            # 判斷是否到了更新進度條顯示的時間，或者模擬已經結束
+            if (sim_clock - last_progress_display_time >= progress_display_interval) or snapshot.get('is_finished'):
+                if progress_widgets:
                     try:
                         p_bar = progress_widgets['bar']
                         p_label = progress_widgets['label']
+                        # 確保最大值已經設定
+                        p_bar['maximum'] = total_duration
                         p_bar['value'] = min(sim_clock, total_duration)
-                        p_label.config(text=f"Generating Heatmap: {sim_clock:.1f}s / {total_duration:.1f}s")
+                        
+                        percent = (min(sim_clock, total_duration) / total_duration) * 100
+                        p_label.config(text=f"Generating Heatmap: {sim_clock:.1f}s / {total_duration:.1f}s ({percent:.0f}%)")
+                        
+                        # 強制刷新 GUI，讓進度條視窗有機會處理事件和繪製更新
                         progress_widgets['window'].update_idletasks()
-                        last_ui_update_time = time.time()
-                    except: pass
+                        
+                        last_progress_display_time = sim_clock # 更新上次顯示時間
+                    except tk.TclError as e: # 捕獲使用者關閉進度視窗時可能發生的錯誤
+                        print(f"Heatmap progress window closed by user during GUI update: {e}, stopping generation.")
+                        return False # 返回 False 表示生成被取消
+                    except Exception as e:
+                        print(f"Error updating Heatmap progress bar: {e}")
+                        return False # 返回 False 表示生成失敗
 
             # --- 優化區塊開始 ---
             

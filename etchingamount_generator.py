@@ -2,6 +2,7 @@ import numpy as np
 import math
 import os
 import matplotlib.pyplot as plt
+import tkinter as tk
 from numba import njit, prange  # [修改] 引入 prange 支援平行運算
 
 from models import DispenseArm
@@ -70,15 +71,19 @@ def _numba_deposit_liquid(film_matrix, conc_matrix, center_x, center_y,
 def _numba_evolve_grid(etch_matrix, film_matrix, conc_matrix, 
                        dt, base_spin_decay, chem_decay_tau, 
                        saturation_h, wafer_radius, 
-                       geo_smoothing, sat_threshold):
+                       geo_smoothing, sat_threshold,
+                       current_rpm, shear_coeff):
     """
-    全網格演化：模擬物理甩乾、化學老化與蝕刻反應。
+    全網格演化：新增相對速度 (剪切應力) 加成。
     """
     rows, cols = etch_matrix.shape
     center_idx = 150.0
-    
     # 預計算化學衰減因子 (每幀衰減比例)
     chem_decay_factor = math.exp(-dt / chem_decay_tau)
+
+    # 預計算角速度 omega (rad/s) = RPM * 2π / 60
+    # 使用 abs() 確保反轉時速度加成依然為正
+    omega = abs(current_rpm) * 0.10472
 
     for i in prange(rows):
         for j in range(cols):
@@ -88,14 +93,24 @@ def _numba_evolve_grid(etch_matrix, film_matrix, conc_matrix,
             if h > 0.0001:
                 c = conc_matrix[i, j]
                 
-                # --- 1. 計算蝕刻反應 (Reaction) ---
+                # 計算該點離圓心的距離 r (mm)
+                dx = i - center_idx
+                dy = j - center_idx
+                r = math.sqrt(dx*dx + dy*dy)
+
+                # --- 1. 計算蝕刻反應 (Reaction, 含剪切加成) ---
                 # 飽和機制：tanh(h / sat_h)
                 # 當膜厚 h 超過 saturation_h，反應速率不再隨厚度增加 (Surface Reaction Limited)
                 # 這能有效防止中心因為積水過厚而導致蝕刻量無限暴增
                 saturation_factor = math.tanh(h / saturation_h)
                 
-                # 本幀蝕刻量 = 濃度 * 飽和因子 * 時間
-                delta_etch = c * saturation_factor * dt
+                # 線速度 v = r * omega (mm/s)
+                v_linear = r * omega
+                # 剪切加成因子 (Shear Factor) = 1 + shear_coeff * v
+                shear_factor = 1.0 + shear_coeff * v_linear
+
+                # 本幀蝕刻量 = 濃度 * 飽和因子 * 剪切因子 * 時間
+                delta_etch = c * saturation_factor * shear_factor * dt
                 
                 # [新增] 飽和門檻處理 (np.tanh 限制極端值)
                 if sat_threshold > 0:
@@ -104,11 +119,6 @@ def _numba_evolve_grid(etch_matrix, film_matrix, conc_matrix,
                 etch_matrix[i, j] += delta_etch
                 
                 # --- 2. 物理甩乾 (Spin-off) ---
-                # 計算該點離圓心的距離
-                dx = i - center_idx
-                dy = j - center_idx
-                r = math.sqrt(dx*dx + dy*dy)
-                
                 if r <= wafer_radius + 5.0:
                     # 徑向甩乾模型：半徑越大，離心力越強，甩乾越快
                     # r_factor 模擬邊緣的高離心力加速乾燥
@@ -152,6 +162,7 @@ class EtchingAmountGenerator:
         imp_bonus = config.get('ETCHING_IMPINGEMENT_BONUS', ETCHING_IMPINGEMENT_BONUS)
         geo_smoothing = config.get('ETCHING_GEO_SMOOTHING', ETCHING_GEO_SMOOTHING)
         sat_threshold = config.get('ETCHING_SATURATION_THRESHOLD', ETCHING_SATURATION_THRESHOLD)
+        shear_coeff = config.get('ETCHING_SHEAR_COEFF', 0.0001)
 
         # 1. 初始化 Headless Arms
         headless_arms = {i: DispenseArm(i, geo['pivot'], geo['home'], geo['length'], geo['p_start'], geo['p_end'], None, None) 
@@ -187,8 +198,17 @@ class EtchingAmountGenerator:
         dt = 1.0 / report_fps
         total_duration = sum(p['total_duration'] for p in recipe['processes'])
         sim_clock = 0.0
-        import time
-        last_ui_update_time = time.time()
+
+        # 新增：控制進度條顯示更新的頻率 (例如每 0.5 秒更新一次進度條上的文字和百分比)
+        progress_display_interval = 0.5
+        last_progress_display_time = 0.0 # 上次更新進度條顯示的時間
+
+        # 新增：在循環開始前，為 JIT 編譯提供提示，並強制刷新 GUI
+        if progress_widgets:
+            progress_widgets['label'].config(text="Initializing JIT Engine for Etching (first run might be slow)...")
+            # 確保 progress_widgets['bar'] 的最大值已經設定
+            progress_widgets['bar']['maximum'] = total_duration
+            progress_widgets['window'].update_idletasks() # 強制刷新 GUI
 
         # 4. 執行模擬主迴圈
         while True:
@@ -204,28 +224,35 @@ class EtchingAmountGenerator:
                 })
                 next_record_time += record_interval
             
-            if progress_widgets:
-                # FPS = 每 0.5 秒更新一次 UI
-                if time.time() - last_ui_update_time >= 0.5:
+            # 判斷是否到了更新進度條顯示的時間，或者模擬已經結束
+            if (sim_clock - last_progress_display_time >= progress_display_interval) or snapshot.get('is_finished'):
+                if progress_widgets:
                     try:
                         p_bar = progress_widgets['bar']
                         p_label = progress_widgets['label']
+                        # 確保最大值已經設定
+                        p_bar['maximum'] = total_duration
                         p_bar['value'] = min(sim_clock, total_duration)
-                        p_label.config(text=f"Etching (Film Model): {sim_clock:.1f}s / {total_duration:.1f}s")
+                        
+                        percent = (min(sim_clock, total_duration) / total_duration) * 100
+                        p_label.config(text=f"Etching (Film Model): {sim_clock:.1f}s / {total_duration:.1f}s ({percent:.0f}%)")
+                        
+                        # 強制刷新 GUI，讓進度條視窗有機會處理事件 and 繪製更新
                         progress_widgets['window'].update_idletasks()
-                        last_ui_update_time = time.time()
-                    except: pass
+                        
+                        last_progress_display_time = sim_clock # 更新上次顯示時間
+                    except tk.TclError as e: # 捕獲使用者關閉進度視窗時可能發生的錯誤
+                        print(f"Etching progress window closed by user during GUI update: {e}, stopping generation.")
+                        return False # 返回 False 表示生成被取消
+                    except Exception as e:
+                        print(f"Error updating Etching progress bar: {e}")
+                        return False # 返回 False 表示生成失敗
 
             # --- A. 粒子塗抹 (Deposition) ---
             # 粒子作為 "水源"，將新鮮藥液塗在網格上
             on_wafer_mask = engine.particles_state == 2 # P_ON_WAFER
             if np.any(on_wafer_mask):
                 indices = np.where(on_wafer_mask)[0]
-                current_time = engine.simulation_time_elapsed
-                
-                # 簡單計算粒子是否 "新鮮" (可選：過老的粒子濃度較低)
-                # 這裡暫時假設剛噴出來的粒子濃度都是 1.0 (fresh_conc)
-                # 老化由網格演化負責
                 
                 for i in indices:
                     # 取得相對座標
@@ -243,16 +270,18 @@ class EtchingAmountGenerator:
             # --- B. 網格演化 (Evolution) ---
             # 計算全網格的反應、甩乾與老化
             
-            # 動態調整甩乾率：轉速越快，甩越快
+            # 讀取當下轉速 (snapshot 內含當前的動態 RPM)
             current_rpm = snapshot.get('rpm', 0)
             # 經驗公式：轉速越高，基礎甩乾率越高
             current_spin_decay = base_spin_decay * (1.0 + abs(current_rpm) / 500.0)
 
+            # 呼叫更新後的 Numba 核心
             _numba_evolve_grid(
                 etch_matrix, film_matrix, conc_matrix,
                 dt, current_spin_decay, etch_tau,
                 sat_h, WAFER_RADIUS,
-                geo_smoothing, sat_threshold
+                geo_smoothing, sat_threshold,
+                current_rpm, shear_coeff
             )
 
             if snapshot.get('is_finished') or sim_clock > (total_duration + 3.0):

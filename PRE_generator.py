@@ -2,6 +2,7 @@ import numpy as np
 import math
 import os
 import matplotlib.pyplot as plt
+import tkinter as tk
 from numba import njit # [新增]
 
 from models import DispenseArm
@@ -94,24 +95,45 @@ class PREGenerator:
         dt = 1.0 / report_fps
         total_duration = sum(p['total_duration'] for p in recipe['processes'])
         sim_clock = 0.0
-        import time
-        last_ui_update_time = time.time()
+
+        # 新增：控制進度條顯示更新的頻率 (例如每 0.5 秒更新一次進度條上的文字 and 百分比)
+        progress_display_interval = 0.5
+        last_progress_display_time = 0.0 # 上次更新進度條顯示的時間
+
+        # 新增：在循環開始前，為 JIT 編譯提供提示，並強制刷新 GUI
+        if progress_widgets:
+            progress_widgets['label'].config(text="Initializing JIT Engine for PRE (first run might be slow)...")
+            # 確保 progress_widgets['bar'] 的最大值已經設定
+            progress_widgets['bar']['maximum'] = total_duration
+            progress_widgets['window'].update_idletasks() # 強制刷新 GUI
 
         while True:
             snapshot = engine.update(dt) 
             sim_clock += dt
             
-            if progress_widgets:
-                # FPS = 每 0.5 秒更新一次 UI
-                if time.time() - last_ui_update_time >= 0.5:
+            # 判斷是否到了更新進度條顯示的時間，或者模擬已經結束
+            if (sim_clock - last_progress_display_time >= progress_display_interval) or snapshot.get('is_finished'):
+                if progress_widgets:
                     try:
                         p_bar = progress_widgets['bar']
                         p_label = progress_widgets['label']
+                        # 確保最大值已經設定
+                        p_bar['maximum'] = total_duration
                         p_bar['value'] = min(sim_clock, total_duration)
-                        p_label.config(text=f"Dose Simulation (Accelerated): {sim_clock:.1f}s / {total_duration:.1f}s")
+                        
+                        percent = (min(sim_clock, total_duration) / total_duration) * 100
+                        p_label.config(text=f"Dose Simulation (Accelerated): {sim_clock:.1f}s / {total_duration:.1f}s ({percent:.0f}%)")
+                        
+                        # 強制刷新 GUI，讓進度條視窗有機會處理事件 and 繪製更新
                         progress_widgets['window'].update_idletasks()
-                        last_ui_update_time = time.time()
-                    except: pass
+                        
+                        last_progress_display_time = sim_clock # 更新上次顯示時間
+                    except tk.TclError as e: # 捕獲使用者關閉進度視窗時可能發生的錯誤
+                        print(f"PRE progress window closed by user during GUI update: {e}, stopping generation.")
+                        return False # 返回 False 表示生成被取消
+                    except Exception as e:
+                        print(f"Error updating PRE progress bar: {e}")
+                        return False # 返回 False 表示生成失敗
 
             current_proc = recipe['processes'][snapshot['process_idx']]
             q_actual = current_proc.get('flow_rate', pre_q_ref)
@@ -154,10 +176,67 @@ class PREGenerator:
             if snapshot.get('is_finished') or sim_clock > (total_duration + 10.0):
                 break
 
-        self._export_results(dose_matrix, filepath, config=config)
+        # --- [新增] 蒙地卡羅缺陷模擬流程 ---
+        pre_defect_count = int(config.get('PRE_DEFECT_COUNT', 10000))
+        defectmap_cali = config.get('PRE_DEFECT_CALI', 0.5)
+
+        if progress_widgets:
+            try:
+                progress_widgets['label'].config(text="Running Monte Carlo Defect Prediction...")
+                progress_widgets['window'].update_idletasks()
+            except:
+                pass
+
+        incoming_defects = self._generate_incoming_defects(pre_defect_count)
+        final_defects = self._simulate_defect_survival(incoming_defects, dose_matrix, defectmap_cali)
+
+        self._export_results(dose_matrix, final_defects, filepath, config=config)
         return True
+
+    def _generate_incoming_defects(self, count):
+        """
+        模擬進站原始缺陷：包含座標與符合冪律分佈的粒徑 (dp)
+        """
+        # 產生符合 Wafer 範圍內 (150mm) 的隨機座標
+        phis = np.random.uniform(0, 2 * np.pi, count)
+        rs = np.sqrt(np.random.uniform(0, 150**2, count))
+        xs = rs * np.cos(phis)
+        ys = rs * np.sin(phis)
+        
+        # 粒徑分布 (dp): 模擬 Fab 常見的小粒子多、大粒子少
+        # 使用 log-normal 分佈，平均直徑約在 12nm ~ 30nm 區間 (exp(2.5) ~ 12, exp(3.0) ~ 20)
+        dp = np.random.lognormal(mean=2.8, sigma=0.4, size=count) 
+        
+        return np.stack((xs, ys, dp), axis=1)
+
+    def _simulate_defect_survival(self, incoming_defects, dose_matrix, cali_a):
+        """
+        核心判定邏輯：P_survive = exp(-cali_a * Dose / D_crit)
+        """
+        survived = []
+        grid_size = dose_matrix.shape[0]
+        
+        for x, y, dp in incoming_defects:
+            # 座標轉索引 (150mm -> index 150, range -150~150 -> 0~300)
+            ix = int(np.clip(x + 150, 0, grid_size - 1))
+            iy = int(np.clip(y + 150, 0, grid_size - 1))
+            
+            local_dose = dose_matrix[ix, iy]
+            
+            # 物理阻力模型：小粒子 D_crit 越高 (越難洗)
+            # 這裡假設抵抗力與粒徑成反比 (或者說清洗效率與粒徑成正比)
+            d_crit = 1.0 / (math.sqrt(dp) + 1e-6)
+            
+            # 計算殘留機率
+            p_survive = math.exp(-cali_a * local_dose / d_crit)
+            
+            # 蒙地卡羅隨機判定
+            if np.random.random() < p_survive:
+                survived.append([x, y, dp])
+                
+        return np.array(survived)
     
-    def _export_results(self, matrix, filepath, config=None):
+    def _export_results(self, matrix, final_defects, filepath, config=None):
         base_path, _ = os.path.splitext(filepath)
         png_path = filepath
         real_base = base_path.replace("_Cleaning_Dose", "")
@@ -242,6 +321,50 @@ class PREGenerator:
 
         # 3. 輸出徑向分佈圖 (Radial Distribution)
         self._export_radial_distribution(matrix, radial_png_path)
+
+        # 4. [新增] 輸出缺陷圖 (Defect Map)
+        pre_defect_count = int(config.get('PRE_DEFECT_COUNT', 10000))
+        self._export_defect_map(final_defects, filepath, pre_defect_count)
+
+    def _export_defect_map(self, points, filepath, total_incoming):
+        base_path, _ = os.path.splitext(filepath)
+        real_base = base_path.replace("_Cleaning_Dose", "")
+        map_path = f"{real_base}_Defect_Map.png"
+        
+        plt.figure(figsize=(10, 10), dpi=150)
+        ax = plt.gca()
+        ax.set_aspect('equal')
+        ax.set_facecolor('#f8f9fa') # 淺灰背景
+        
+        # 畫出存活的點
+        if len(points) > 0:
+            # 點大小隨粒徑縮放，並限制最小/最大視覺大小
+            sizes = np.clip(points[:, 2] * 0.3, 1, 50)
+            plt.scatter(points[:, 0], points[:, 1], 
+                        s=sizes,
+                        c='red', alpha=0.6, edgecolors='none', label='Remaining Defects')
+        
+        # 繪製晶圓邊界
+        wafer = plt.Circle((0, 0), 150, color='#007bff', fill=False, lw=2, alpha=0.5)
+        ax.add_artist(wafer)
+        
+        # 設定座標軸範圍
+        plt.xlim(-160, 160)
+        plt.ylim(-160, 160)
+        plt.grid(True, linestyle=':', alpha=0.3)
+
+        # 顯示結果文字
+        rem_count = len(points)
+        pre_val = (1 - rem_count / total_incoming) * 100 if total_incoming > 0 else 0.0
+        plt.title(f"Predicted Defect Map\nRemaining: {rem_count} / {total_incoming} (PRE: {pre_val:.2f}%)", 
+                  fontsize=14, pad=10)
+        
+        plt.xlabel("X (mm)")
+        plt.ylabel("Y (mm)")
+        
+        plt.tight_layout()
+        plt.savefig(map_path, dpi=200)
+        plt.close()
 
     def _export_radial_distribution(self, matrix, filepath):
         grid_size = matrix.shape[0]

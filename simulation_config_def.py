@@ -4,7 +4,8 @@
 
 PARAMETER_DEFINITIONS = {
     "General": {
-        "TRANSITION_ARM_SPEED_RATIO": ("Trans. Speed Ratio", 0.8, 'float', (0.1, 2.0), "Arm 不噴灑時移動的速度(相對最快速度）"),
+        "MAX_NOZZLE_SPEED_MMS":       ("Max Nozzle Speed (mm/s)", 250.0, 'float', (1.0, 1000.0), "Arm 最快速度(mm/s)，EOS 為250，DNS 為366"),
+        "TRANSITION_ARM_SPEED_RATIO": ("Trans. Speed Ratio", 0.8, 'float', (0.1, 2.0), "Arm 不噴灑時移動的速度ß"),
         "ARM_CHANGE_PAUSE_TIME":      ("Arm Change Pause (s)", 1.0, 'float', (0.0, 10.0), "Arm 切換之間的停頓時間 (s)"),
         "CENTER_PAUSE_TIME":          ("Center Pause (s)", 0.8, 'float', (0.0, 10.0), "Arm 抵達晶圓中心後停頓的時間 (s)"),
         "REPORT_INTERVAL_MM":         ("Report Interval (mm)", 2.0, 'float', (0.1, 50.0), "Simulation Report 徑向間隔 (mm)"),
@@ -18,6 +19,7 @@ PARAMETER_DEFINITIONS = {
         "ETCHING_IMPINGEMENT_BONUS":  ("Impingement Bonus", 1.2, 'float', (1.0, 50.0), "衝擊加成倍數。噴嘴正下方新鮮藥液撞擊帶來的蝕刻增益。"),
         "ETCHING_GEO_SMOOTHING":      ("Geo Smoothing", 0.1, 'float', (0.0, 150.0), "幾何平滑係數。配合平方項校正公式，用於微調中心點的數值。"),
         "ETCHING_SATURATION_THRESHOLD":("Sat. Threshold", 0.0, 'float', (0.0, 10.0), "最終蝕刻量飽和閥值。用於 np.tanh 限制極端值的數學處理。"),
+        "ETCHING_SHEAR_COEFF":        ("Shear Coeff", 0.0001, 'float', (0.0, 0.1), "剪切應力加成係數。模擬高速流動時邊界層變薄、傳質速率增加的現象。"),
     },
     "Particle Removal": {
         "PRE_ALPHA":                  ("Alpha (Shear)", 0.001, 'float', (0.0, 1.0), "剪切項係數"),
@@ -25,12 +27,26 @@ PARAMETER_DEFINITIONS = {
         "PRE_GRID_SIZE":              ("PRE Grid Size (mm)", 5.0, 'float', (1.0, 30.0), "清洗影響半徑 (mm)"),
         "PRE_Q_REF":                  ("Q Ref (mL/min)", 1000.0, 'float', (100.0, 5000.0), "參考流量 (mL/min)"),
         "PRE_GAMMA_BASE":             ("Gamma Base", 0.001, 'float', (0.0, 1.0), "基礎再附著係數 (1/mm)"),
+        "PRE_DEFECT_COUNT":           ("Initial Defect Count", 10000, 'int', (10, 100000), "模擬進站初始缺陷數量"),
+        "PRE_DEFECT_CALI":            ("Defect Map Cali", 0.5, 'float', (0.01, 10.0), "缺陷殘留機率校正係數"),
     },
     "Charging Simulation": {
-        "FLUID_CONDUCTIVITY":         ("Conductivity (S/m)", 5.0e-09, 'float', (1.0e-16, 10.0), "藥液導電率 (S/m)。DIW 約 5e-6，化學液約 1.0。"),
-        "FLUID_RELATIVE_PERMITTIVITY":("Rel. Permittivity", 80.0, 'float', (1.0, 100.0), "相對介電常數。水約為 80。"),
-        "CHARGING_EFFICIENCY":        ("Charging Efficiency", -5.0e-5, 'float', (-1.0, 1.0), "電荷產生效率經驗係數。"),
-        "CHARGING_BASE_SPIN_DECAY":    ("Base Spin Decay", 2.0, 'float', (0.00000001, 10.0), "基礎甩乾速率。模擬液體因旋轉與蒸發離開表面的速度。"),
+        # 1. 流體基礎電性
+        "FLUID_CONDUCTIVITY":         ("Conductivity (S/m)", 5.0e-12, 'float', (1.0e-16, 10.0), "藥液導電率。低導電率 (如 1e-12) 較易觀察到電荷累積。"),
+        "FLUID_RELATIVE_PERMITTIVITY":("Rel. Permittivity", 80.0, 'float', (1.0, 100.0), "相對介電常數。水約 80，IPA 約 18。"),
+        
+        # 2. 電荷分離與轉速修正 (解決轉速矛盾)
+        "CHARGING_EFFICIENCY":        ("Base Efficiency", -1.0e-7, 'float', (-1.0, 1.0), "基礎生成係數。TEOS 表面通常設為負值。"),
+        "CHARGING_RPM_FACTOR":        ("RPM Scaling Factor", 5.0, 'float', (0.0, 50.0), "轉速增強因子。模擬高轉速剪切力導致的非線性電荷分離。"),
+        
+        # 3. 表面電荷物理 (解決平滑度與擴散)
+        "SURFACE_DIFFUSION_COEFF":    ("Surface Diffusion", 0.1, 'float', (0.0, 1.0), "表面電荷橫向擴散係數。數值越高，KPFM 曲線越平滑。"),
+        "DIFFUSION_STABILITY_LIMIT":  ("Stability Limit (α)", 0.25, 'float', (0.1, 0.25), "數值穩定性限制 (Fourier Number)。維持 0.25 以確保不震盪。"),
+        
+        # 4. 製程與量測映射
+        "CHARGING_SPRAY_RADIUS":      ("Spray Radius (mm)", 2.0, 'float', (0.5, 10.0), "噴嘴水滴撞擊產生的電荷分離有效半徑。"),
+        "CHARGING_BASE_SPIN_DECAY":   ("Liquid Spin Decay", 2.0, 'float', (1e-8, 10.0), "液體甩乾速率。僅影響 Mobile Charge 的流失速度。"),
+        "KPFM_CAPACITANCE":           ("KPFM Equiv. Cap", 1.0e-10, 'float', (1e-12, 1e-8), "KPFM 等效電容因子。用於將模擬庫倫值映射到實驗伏特值。"),
     },
     "Advanced Physics Parameters": {
         "PHYSICS_PRESSURE_PUSH_STRENGTH": ("Pressure Push", 5.0, 'float', (0.0, 5000.0), "中心區域推力強度 (解決中心堆積)"),

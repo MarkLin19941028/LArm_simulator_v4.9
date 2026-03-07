@@ -232,6 +232,11 @@ class SimulationApp:
         canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
 
+        # 綁定滑鼠滾輪事件 (包含 Windows/macOS 和 Linux)
+        canvas.bind_all("<MouseWheel>", lambda e: self._on_mousewheel(e, canvas))
+        canvas.bind_all("<Button-4>", lambda e: self._on_mousewheel(e, canvas))
+        canvas.bind_all("<Button-5>", lambda e: self._on_mousewheel(e, canvas))
+
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
         
@@ -317,6 +322,12 @@ class SimulationApp:
         main_canvas.grid(row=0, column=0, sticky="nsew")
         v_scrollbar.grid(row=0, column=1, sticky="ns")
         h_scrollbar.grid(row=1, column=0, sticky="ew")
+
+        # 綁定滑鼠滾輪事件 (包含 Windows/macOS 和 Linux)
+        main_canvas.bind_all("<MouseWheel>", lambda e: self._on_mousewheel(e, main_canvas))
+        main_canvas.bind_all("<Button-4>", lambda e: self._on_mousewheel(e, main_canvas))
+        main_canvas.bind_all("<Button-5>", lambda e: self._on_mousewheel(e, main_canvas))
+
         self.scrollable_frame = ttk.Frame(main_canvas, padding="10")
         main_canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
         self.scrollable_frame.bind("<Configure>", lambda e: main_canvas.configure(scrollregion=main_canvas.bbox("all")))
@@ -489,6 +500,17 @@ class SimulationApp:
             self.processes_data.append(proc_data_dict)
             self._on_spin_mode_change(i)
             self.recreate_step_entries(i)
+
+    def _on_mousewheel(self, event, canvas):
+        """根據不同作業系統處理滑鼠滾輪事件"""
+        if not canvas.winfo_exists():
+            return
+        # Windows & macOS 使用 event.delta
+        # Linux 通常使用 Button-4 (Up) and Button-5 (Down)
+        if event.num == 5 or event.delta < 0:
+            canvas.yview_scroll(1, "units")
+        elif event.num == 4 or event.delta > 0:
+            canvas.yview_scroll(-1, "units")
 
     def recreate_step_entries(self, process_index):
         proc_data = self.processes_data[process_index]
@@ -1075,13 +1097,15 @@ class SimulationApp:
         ax.set_facecolor('#111111')
         ax.add_patch(plt.Circle((0, 0), WAFER_RADIUS, facecolor='#333333', edgecolor='cyan', lw=1.5, zorder=1))
 
+        # 建立 config 並指定模式
+        pattern_config = self.get_current_config() # 獲取目前的物理參數
+        max_speed = pattern_config.get('MAX_NOZZLE_SPEED_MMS', 250.0)
+
         headless_arms = {}
         for i in range(1, 4):
             geo = ARM_GEOMETRIES[i]
-            headless_arms[i] = DispenseArm(i, geo['pivot'], geo['home'], geo['length'], geo['p_start'], geo['p_end'], None, None)
+            headless_arms[i] = DispenseArm(i, geo['pivot'], geo['home'], geo['length'], geo['p_start'], geo['p_end'], None, None, max_nozzle_speed_mms=max_speed)
 
-        # 建立 config 並指定模式
-        pattern_config = self.get_current_config() # 獲取目前的物理參數
         pattern_config['SIMULATION_MODE'] = 'pattern_only' # 強制覆蓋為純軌跡模式
 
         engine = SimulationEngine(recipe, headless_arms, {}, headless=True, config=pattern_config)
@@ -1143,7 +1167,10 @@ class SimulationApp:
         plt.close(fig)
 
     def _run_headless_simulation(self, recipe, progress_widgets=None):
-        headless_arms = {i: DispenseArm(i, geo['pivot'], geo['home'], geo['length'], geo['p_start'], geo['p_end'], None, None) 
+        current_config = self.get_current_config()
+        max_speed = current_config.get('MAX_NOZZLE_SPEED_MMS', 250.0)
+
+        headless_arms = {i: DispenseArm(i, geo['pivot'], geo['home'], geo['length'], geo['p_start'], geo['p_end'], None, None, max_nozzle_speed_mms=max_speed) 
                          for i, geo in ARM_GEOMETRIES.items()}
 
         global_water_params = self._get_water_params()
@@ -1290,6 +1317,13 @@ class SimulationApp:
         if not self.sim_window or not self.sim_window.winfo_exists(): self.create_simulator_window()
         
         current_config = self.get_current_config()
+        
+        # 動態更新手臂的最大速度，避免需要重新開啟視窗
+        max_speed = current_config.get('MAX_NOZZLE_SPEED_MMS', 250.0)
+        for arm in self.arms.values():
+            if hasattr(arm, 'update_max_speed'):
+                arm.update_max_speed(max_speed)
+                
         self.engine = SimulationEngine(self.recipe, self.arms, water_params_dict, config=current_config)
         self.is_paused = False
         self.speed_var.set("1x")
@@ -1308,12 +1342,17 @@ class SimulationApp:
         if self.arms: return
         fig = Figure()
         ax = fig.add_subplot(111)
+        
+        # 使用預設配置獲取 max_speed
+        config = get_default_config()
+        max_speed = config.get('MAX_NOZZLE_SPEED_MMS', 250.0)
+        
         self.arms = {}
         for i in range(1, 4):
             arm_line, = ax.plot([], [])
             nozzle_head = plt.Circle((0, 0), 10)
             geo = ARM_GEOMETRIES[i]
-            self.arms[i] = DispenseArm(i, geo['pivot'], geo['home'], geo['length'], geo['p_start'], geo['p_end'], arm_line, nozzle_head)
+            self.arms[i] = DispenseArm(i, geo['pivot'], geo['home'], geo['length'], geo['p_start'], geo['p_end'], arm_line, nozzle_head, max_nozzle_speed_mms=max_speed)
 
     def _on_simulator_close(self):
         self.ani_running = False
@@ -1382,13 +1421,17 @@ class SimulationApp:
         self.ax.add_patch(self.notch_patch)
         mask_inner, mask_outer = WAFER_RADIUS + 10, CHAMBER_SIZE / 2
         self.ax.add_patch(patches.Wedge((0, 0), mask_outer, 0, 360, width=mask_outer - mask_inner, facecolor='black', zorder=11))
+        
+        current_config = self.get_current_config()
+        max_speed = current_config.get('MAX_NOZZLE_SPEED_MMS', 250.0)
+        
         self.arms = {}; arm_colors = {1: 'lime', 2: 'magenta', 3: 'yellow'}
         for i in range(1, 4):
             arm_line, = self.ax.plot([], [], color='gray', lw=4, visible=False, zorder=12)
             nozzle_head = plt.Circle((0, 0), 10, facecolor=arm_colors[i], visible=False, zorder=13)
             self.ax.add_patch(nozzle_head)
             geo = ARM_GEOMETRIES[i]
-            self.arms[i] = DispenseArm(i, geo['pivot'], geo['home'], geo['length'], geo['p_start'], geo['p_end'], arm_line, nozzle_head)
+            self.arms[i] = DispenseArm(i, geo['pivot'], geo['home'], geo['length'], geo['p_start'], geo['p_end'], arm_line, nozzle_head, max_nozzle_speed_mms=max_speed)
         self.water_columns = {i: WaterColumn(self.ax, 500.0) for i in range(1, 4)}
         self.status_text = self.ax.text(0.02, 0.98, '', transform=self.ax.transAxes, fontdict={'family': 'serif', 'color': 'white', 'verticalalignment': 'top', 'size': 11}, zorder=20)
         return []

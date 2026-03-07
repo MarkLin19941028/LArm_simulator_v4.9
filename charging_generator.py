@@ -2,6 +2,7 @@ import numpy as np
 import math
 import os
 import matplotlib.pyplot as plt
+import tkinter as tk
 from numba import njit, prange
 
 from simulation_engine import SimulationEngine
@@ -13,51 +14,51 @@ from constants import (
 )
 
 # ==========================================
-# Numba Kernel 1: 電荷生成 (Source Term)
+# Numba Kernel 1: 電荷分離 (Charge Separation)
 # ==========================================
 @njit(fastmath=True, cache=True)
-def _numba_deposit_charge(charge_matrix, film_matrix, 
-                          pos_x, pos_y, vel_x, vel_y, 
-                          radius, grid_size, dt, 
-                          charging_efficiency):
-    """
-    物理機制: 流動帶電 (Streaming Current)
-    邏輯: 
-    1. 當液體粒子接觸晶圓，根據其「相對速度」產生電荷分離。
-    2. 速度越快 (摩擦越大) -> 產生電荷越多。
-    """
-    # 座標轉換 (-150mm~150mm -> 0~300 pixel)
+def _numba_deposit_and_separate_charge(surface_charge, liquid_charge, film_matrix, 
+                                       pos_x, pos_y, vel_x, vel_y, 
+                                       radius, grid_size, dt, 
+                                       dynamic_eff):
     center_offset = 150.0
-    idx_x = pos_x + center_offset
-    idx_y = pos_y + center_offset
-    
+    idx_x, idx_y = pos_x + center_offset, pos_y + center_offset
     r_pixel = int(math.ceil(radius))
-    min_i = max(0, int(math.floor(idx_x - r_pixel)))
-    max_i = min(grid_size - 1, int(math.ceil(idx_x + r_pixel)))
-    min_j = max(0, int(math.floor(idx_y - r_pixel)))
-    max_j = min(grid_size - 1, int(math.ceil(idx_y + r_pixel)))
     
-    radius_sq = radius * radius
+    # 邊界限制
+    min_i, max_i = int(max(0, idx_x - r_pixel)), int(min(grid_size - 1, idx_x + r_pixel))
+    min_j, max_j = int(max(0, idx_y - r_pixel)), int(min(grid_size - 1, idx_y + r_pixel))
     
-    # [關鍵物理計算 1]: 流動電流生成率
-    # I_gen ∝ v (速度) * Area (接觸面積) * Efficiency (材料/Zeta電位係數)
     speed = math.sqrt(vel_x**2 + vel_y**2)
-    
-    # 這裡假設單顆粒子帶來的電荷量
-    q_gen = charging_efficiency * speed * dt
+    q_gen = dynamic_eff * speed * dt
 
+    radius_sq = radius**2
     for i in range(min_i, max_i + 1):
         for j in range(min_j, max_j + 1):
-            dist_sq = (i - idx_x)**2 + (j - idx_y)**2
-            if dist_sq <= radius_sq:
-                # 簡單的高斯分佈或是均勻分佈權重
-                # 只有當該處有液膜存在時，電荷才能附著
-                # (這裡同時維護一個簡易的 film_matrix 以計算電容)
-                if film_matrix[i, j] > 0:
-                    charge_matrix[i, j] += q_gen
+            if (float(i) - idx_x)**2 + (float(j) - idx_y)**2 <= radius_sq:
+                if film_matrix[i, j] > 1e-5:
+                    # [關鍵邏輯]：表面獲得電荷 (Fixed)，液體獲得反向電荷 (Mobile)
+                    surface_charge[i, j] += q_gen  
+                    liquid_charge[i, j] -= q_gen
 
 # ==========================================
-# Numba Kernel 2: 電荷演化 (Relaxation & Transport)
+# Numba Kernel 2: 表面擴散 (Surface Diffusion)
+# ==========================================
+@njit(fastmath=True, parallel=True, cache=True)
+def _numba_diffuse_surface(surf_in, surf_out, diff_coeff, dt, grid_size):
+    # alpha = D * dt / (dx^2)，此處假設 dx=1
+    alpha = min(0.25, diff_coeff * dt) 
+    
+    for i in prange(1, grid_size - 1):
+        for j in range(1, grid_size - 1):
+            # 2D Laplacian 算子
+            laplacian = (surf_in[i+1, j] + surf_in[i-1, j] + 
+                         surf_in[i, j+1] + surf_in[i, j-1] - 
+                         4.0 * surf_in[i, j])
+            surf_out[i, j] = surf_in[i, j] + alpha * laplacian
+
+# ==========================================
+# Numba Kernel 3: 電荷演化 (Relaxation & Transport)
 # ==========================================
 @njit(fastmath=True, parallel=True, cache=True)
 def _numba_evolve_charge(charge_matrix, film_matrix, dt, 
@@ -127,7 +128,7 @@ class ChargingGenerator:
 
     def generate(self, recipe, filepath, config=None, progress_widgets=None, play_speed_multiplier=1.0):
         """
-        執行電荷累積模擬
+        執行電荷累積模擬 (解耦雙電層模型 Decoupled EDL Model)
         """
         # 1. 讀取設定
         if config is None:
@@ -135,10 +136,12 @@ class ChargingGenerator:
             config = get_default_config()
         
         # 關鍵參數讀取
-        cond = config.get('FLUID_CONDUCTIVITY', DEFAULT_CONDUCTIVITY)
-        perm = config.get('FLUID_RELATIVE_PERMITTIVITY', WATER_RELATIVE_PERMITTIVITY)
-        eff_factor = config.get('CHARGING_EFFICIENCY', 1e-10) # 經驗係數
-        base_spin_decay = config.get('CHARGING_BASE_SPIN_DECAY', CHARGING_BASE_SPIN_DECAY)
+        cond = config.get('FLUID_CONDUCTIVITY', 5.0e-12)
+        perm = config.get('FLUID_RELATIVE_PERMITTIVITY', 80.0)
+        eff_base = config.get('CHARGING_EFFICIENCY', -1.0e-10) # TEOS 通常為負
+        rpm_factor = config.get('CHARGING_RPM_FACTOR', 5.0)    # RPM 增強因子
+        diff_coeff = config.get('SURFACE_DIFFUSION_COEFF', 0.1) # 擴散係數
+        base_spin_decay = config.get('CHARGING_BASE_SPIN_DECAY', 2.0)
         
         # 2. 初始化模擬引擎
         # 為了獨立運作，我們需要自己的 SimulationEngine 來跑粒子軌跡
@@ -151,12 +154,12 @@ class ChargingGenerator:
         
         engine = SimulationEngine(recipe, headless_arms, wp_dict, headless=True, config=config)
         
-        # 3. 初始化網格
+        # 3. 初始化網格 (三層矩陣)
         grid_size = 300
-        # charge_matrix: 儲存累積電荷量 Q (Coulombs)
-        charge_matrix = np.zeros((grid_size, grid_size), dtype=np.float64)
-        # film_matrix: 儲存液膜厚度 (mm)，用於計算電容與判定導通
-        film_matrix = np.zeros((grid_size, grid_size), dtype=np.float64)
+        self.surface_charge = np.zeros((grid_size, grid_size), dtype=np.float64)
+        self.surface_buffer = np.zeros((grid_size, grid_size), dtype=np.float64) # 擴散緩衝
+        self.liquid_charge = np.zeros((grid_size, grid_size), dtype=np.float64)
+        self.film_matrix = np.zeros((grid_size, grid_size), dtype=np.float64)
 
         # 影片同步設定
         VIDEO_FPS = 30.0
@@ -168,9 +171,18 @@ class ChargingGenerator:
         dt = 1.0 / report_fps
         total_duration = sum(p['total_duration'] for p in recipe['processes'])
         sim_clock = 0.0
+
+        # 新增：控制進度條顯示更新的頻率 (例如每 0.5 秒更新一次進度條上的文字 and 百分比)
+        progress_display_interval = 0.5
+        last_progress_display_time = 0.0 # 上次更新進度條顯示的時間
+
+        # 新增：在循環開始前，為 JIT 編譯提供提示，並強制刷新 GUI
+        if progress_widgets:
+            progress_widgets['label'].config(text="Initializing JIT Engine for Charging (first run might be slow)...")
+            # 確保 progress_widgets['bar'] 的最大值已經設定
+            progress_widgets['bar']['maximum'] = total_duration
+            progress_widgets['window'].update_idletasks() # 強制刷新 GUI
         
-        import time
-        last_ui_update_time = time.time()
         print(f"Starting Charging Simulation (Cond={cond:.2e} S/m)...")
 
         # 4. 主迴圈
@@ -178,15 +190,44 @@ class ChargingGenerator:
             # 更新粒子物理
             snapshot = engine.update(dt)
             sim_clock += dt
+            curr_rpm = abs(snapshot.get('rpm', 0))
+
+            # [改良點 1]：計算隨轉速非線性成長的生成效率
+            dynamic_eff = eff_base * (1.0 + (curr_rpm / 1000.0)**2 * rpm_factor)
             
             # 影片快照
             if sim_clock >= next_record_time:
                 video_buffer.append({
-                    'charge': charge_matrix.copy(),
-                    'film': film_matrix.copy(),
+                    'surface_charge': self.surface_charge.copy(),
+                    'liquid_charge': self.liquid_charge.copy(),
+                    'film': self.film_matrix.copy(),
                     'time': sim_clock
                 })
                 next_record_time += record_interval
+
+            # 判斷是否到了更新進度條顯示的時間，或者模擬已經結束
+            if (sim_clock - last_progress_display_time >= progress_display_interval) or snapshot.get('is_finished'):
+                if progress_widgets:
+                    try:
+                        p_bar = progress_widgets['bar']
+                        p_label = progress_widgets['label']
+                        # 確保最大值已經設定
+                        p_bar['maximum'] = total_duration
+                        p_bar['value'] = min(sim_clock, total_duration)
+                        
+                        percent = (min(sim_clock, total_duration) / total_duration) * 100
+                        p_label.config(text=f"Charging: {sim_clock:.1f}s / {total_duration:.1f}s ({percent:.0f}%)")
+                        
+                        # 強制刷新 GUI，讓進度條視窗有機會處理事件和繪製更新
+                        progress_widgets['window'].update_idletasks()
+                        
+                        last_progress_display_time = sim_clock # 更新上次顯示時間
+                    except tk.TclError as e: # 捕獲使用者關閉進度視窗時可能發生的錯誤
+                        print(f"Charging progress window closed by user during GUI update: {e}, stopping generation.")
+                        return False # 返回 False 表示生成被取消
+                    except Exception as e:
+                        print(f"Error updating Charging progress bar: {e}")
+                        return False # 返回 False 表示生成失敗
 
             # --- A. 簡易液膜生成 (為了支撐電荷計算) ---
             on_wafer_mask = engine.particles_state == 2 # P_ON_WAFER
@@ -194,49 +235,39 @@ class ChargingGenerator:
                 indices = np.where(on_wafer_mask)[0]
                 for idx in indices:
                     pos = engine.particles_pos[idx]
-                    self._simple_deposit_film(film_matrix, pos[0], pos[1], 2.0, 0.005) # 2mm半徑, 0.005厚度增量
+                    self._simple_deposit_film(self.film_matrix, pos[0], pos[1], 2.0, 0.005) # 2mm半徑, 0.005厚度增量
             
-            # --- B. 電荷生成 (Source) ---
+            # --- B. 電荷分離沉積 [改良點 2] ---
             if np.any(on_wafer_mask):
                 indices = np.where(on_wafer_mask)[0]
                 for idx in indices:
                     pos = engine.particles_pos[idx]
                     vel = engine.particles_vel[idx]
-                    _numba_deposit_charge(
-                        charge_matrix, film_matrix,
+                    _numba_deposit_and_separate_charge(
+                        self.surface_charge, self.liquid_charge, self.film_matrix,
                         pos[0], pos[1], vel[0], vel[1],
                         2.0, grid_size, dt,
-                        eff_factor
+                        dynamic_eff
                     )
 
-            # --- C. 電荷演化 (Sink) ---
+            # --- C. 表面擴散 (平滑化) [改良點 3] ---
+            _numba_diffuse_surface(self.surface_charge, self.surface_buffer, diff_coeff, dt, 300)
+            self.surface_charge[:] = self.surface_buffer[:] # 更新回原矩陣
+
+            # --- D. 演化液體電荷 (Spin-off) [改良點 4] ---
             rpm = snapshot.get('rpm', 0)
-            # 使用從 config 讀取的 CHARGING_BASE_SPIN_DECAY
             current_spin_decay = base_spin_decay * (1.0 + abs(rpm)/500.0)
             
             _numba_evolve_charge(
-                charge_matrix, film_matrix, dt,
+                self.liquid_charge, self.film_matrix, dt,
                 cond, perm, WAFER_RADIUS, current_spin_decay
             )
-
-            # 更新進度條
-            if progress_widgets:
-                if time.time() - last_ui_update_time >= 0.5:
-                    try:
-                        p_bar = progress_widgets['bar']
-                        p_label = progress_widgets['label']
-                        p_bar['value'] = min(sim_clock, total_duration)
-                        percent = (min(sim_clock, total_duration) / total_duration) * 100
-                        p_label.config(text=f"Charging: {sim_clock:.1f}s / {total_duration:.1f}s ({percent:.0f}%)")
-                        progress_widgets['window'].update_idletasks()
-                        last_ui_update_time = time.time()
-                    except: pass
 
             if snapshot.get('is_finished') or sim_clock > total_duration + 2.0:
                 break
         
         # 5. 結果輸出
-        self._export_results(charge_matrix, film_matrix, filepath, perm, config, video_buffer, VIDEO_FPS)
+        self._export_results(self.surface_charge, self.film_matrix, filepath, perm, config, video_buffer, VIDEO_FPS)
         return True
 
     @staticmethod
@@ -257,8 +288,8 @@ class ChargingGenerator:
         radial_png_path = f"{real_base}_Charging_Radial_Distribution.png"
         video_path = f"{real_base}_Charging_Simulation.mp4"
 
-        # 計算電位矩陣
-        potential_map = self._calculate_potential(charge_Q, film_H, rel_perm)
+        # 計算電位矩陣 (基於表面電荷與等效電容)
+        potential_map = self._calculate_potential(charge_Q, config)
 
         # 1. 輸出 Heatmap PNG
         self._export_potential_map(potential_map, filepath, config)
@@ -267,15 +298,13 @@ class ChargingGenerator:
         self._export_radial_distribution(potential_map, radial_png_path)
 
         # 3. 輸出影片
-        self._export_charging_video(video_buffer, video_path, rel_perm, fps)
+        self._export_charging_video(video_buffer, video_path, config, fps)
 
-    def _calculate_potential(self, charge_Q, film_H, rel_perm):
-        epsilon = rel_perm * VACUUM_PERMITTIVITY
-        area = 1e-6 # 1mm^2
-        potential_map = np.zeros_like(charge_Q)
-        mask = film_H > 1e-6
-        if np.any(mask):
-            potential_map[mask] = (charge_Q[mask] * (film_H[mask] * 1e-3)) / (epsilon * area)
+    def _calculate_potential(self, surface_Q, config):
+        # KPFM 量測的是乾燥後的表面殘留電位
+        # V = Q_surface / C_kpfm
+        kpfm_cap = config.get('KPFM_CAPACITANCE', 1.0e-10) # 用於校準伏特數值的縮放因子
+        potential_map = surface_Q / kpfm_cap
         return potential_map
 
     def _export_potential_map(self, potential_map, filepath, current_config):
@@ -355,7 +384,7 @@ class ChargingGenerator:
         plt.savefig(filepath, bbox_inches='tight', dpi=300)
         plt.close()
 
-    def _export_charging_video(self, video_buffer, output_path, rel_perm, fps):
+    def _export_charging_video(self, video_buffer, output_path, config, fps):
         import cv2
         if not video_buffer: return
 
@@ -367,14 +396,14 @@ class ChargingGenerator:
         cv2.circle(mask, (view_size//2, view_size//2), view_size//2, 255, -1)
 
         # 預計算最終最大值作為歸一化基準
-        final_potential = self._calculate_potential(video_buffer[-1]['charge'], video_buffer[-1]['film'], rel_perm)
+        final_potential = self._calculate_potential(video_buffer[-1]['surface_charge'], config)
         v_max_final = np.max(final_potential)
         v_min_final = np.min(final_potential)
-        abs_max_global = max(abs(v_max_final), abs(v_min_final), 0.1)
+        abs_max_global = max(abs(v_max_final), abs(v_min_final), 1e-5)
 
         print(f"Exporting Charging Video...")
         for frame_data in video_buffer:
-            p_map = self._calculate_potential(frame_data['charge'], frame_data['film'], rel_perm)
+            p_map = self._calculate_potential(frame_data['surface_charge'], config)
             
             # 歸一化到 0-255，且 0V 剛好在中間 (127)
             # (val - (-abs_max)) / (2 * abs_max) * 255
