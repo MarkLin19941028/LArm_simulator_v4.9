@@ -1135,8 +1135,12 @@ class SimulationApp:
 
             curr_arm_id = snapshot['active_arm_id']
             curr_spraying = snapshot['is_spraying']
+            
+            # 獲取當前製程流量，只有流量 > 0 才記錄
+            current_proc_idx = snapshot['process_idx']
+            current_flow = recipe['processes'][current_proc_idx].get('flow_rate', 0)
 
-            if curr_arm_id != 0 and curr_spraying:
+            if curr_arm_id != 0 and curr_spraying and current_flow > 0:
                 if not last_was_spraying or curr_arm_id != last_active_id:
                     arm_trajectories[curr_arm_id].append([])
                 abs_pos = snapshot['nozzle_pos'][:2]
@@ -1146,20 +1150,38 @@ class SimulationApp:
                 nozzle_pos_rotated = np.dot(inv_rot_matrix, abs_pos)
                 arm_trajectories[curr_arm_id][-1].append(nozzle_pos_rotated)
 
-            last_was_spraying = curr_spraying
+            last_was_spraying = (curr_spraying and current_flow > 0)
             last_active_id = curr_arm_id
             if snapshot.get('is_finished') or snapshot['time'] > (total_duration + 30.0): break
 
         arm_colors = {1: 'lime', 2: 'magenta', 3: 'yellow'}
         has_any_trajectory = False
+        
+        # 用於建立圖例
+        legend_elements = []
+        
         for arm_id, segments in arm_trajectories.items():
+            first_seg_drawn = False
             for segment in segments:
                 if segment:
                     has_any_trajectory = True
                     coords = np.array(segment)
-                    ax.plot(coords[:, 0], coords[:, 1], color=arm_colors[arm_id], linewidth=NOZZLE_RADIUS_MM * 2, solid_capstyle='round', alpha=0.6, zorder=10)
+                    # 只有該 Arm 的第一段標記 label，避免圖例重複顯示
+                    label = f"Arm {arm_id}" if not first_seg_drawn else None
+                    line, = ax.plot(coords[:, 0], coords[:, 1], color=arm_colors[arm_id], linewidth=NOZZLE_RADIUS_MM * 2, 
+                                    solid_capstyle='round', alpha=0.6, zorder=10, label=label)
+                    if not first_seg_drawn:
+                        legend_elements.append(line)
+                        first_seg_drawn = True
 
         if has_any_trajectory:
+            # 增加圖例 (Legend)
+            leg = ax.legend(handles=legend_elements, loc='upper right', frameon=True, fontsize=10)
+            leg.get_frame().set_facecolor('#222222')
+            leg.get_frame().set_edgecolor('white')
+            for text in leg.get_texts():
+                text.set_color('white')
+
             final_pos = snapshot['nozzle_pos']
             ax.plot(final_pos[0], final_pos[1], 'o', color='yellow', markersize=4, zorder=15)
 
@@ -1237,18 +1259,22 @@ class SimulationApp:
                 radial_interval = current_config.get('REPORT_INTERVAL_MM', 2.0)
                 radial_counts = calculate_water_counts_by_radius(all_on_wafer_coords, WAFER_RADIUS, radial_interval)
                 
-                nozzle_r = np.linalg.norm(nozzle_pos) if snapshot['active_arm_id'] != 0 else 0.0
+                active_id = snapshot['active_arm_id']
+                nozzle_r = np.linalg.norm(nozzle_pos) if active_id != 0 else 0.0
 
                 row_data = {
                     'Time Elapsed': f"{snapshot['time']:.2f}",
                     'Process Recipe Number': snapshot['process_idx'] + 1,
-                    'Dispense Arm Number': snapshot['active_arm_id'] if snapshot['active_arm_id'] != 0 else 'N/A',
+                    'Dispense Arm Number': active_id if active_id != 0 else 'N/A',
                     'State': snapshot['state'],
                     'Process Time': "Running" if snapshot['state'] in [STATE_RUNNING_PROCESS, STATE_MOVING_FROM_CENTER_TO_START] else "N/A",
                     'Spin speed': f"{snapshot['rpm']:.2f}",
-                    'Nozzle X-Position': f"{nozzle_pos[0]:.3f}" if snapshot['active_arm_id'] != 0 else 'N/A',
-                    'Nozzle Y-Position': f"{nozzle_pos[1]:.3f}" if snapshot['active_arm_id'] != 0 else 'N/A',
-                    'Nozzle Radius': f"{nozzle_r:.3f}" if snapshot['active_arm_id'] != 0 else 'N/A',
+                    'Nozzle 1 (X,Y)': f"({nozzle_pos[0]:.3f}, {nozzle_pos[1]:.3f})" if active_id == 1 else 'N/A',
+                    'Nozzle 1 Radius': f"{nozzle_r:.3f}" if active_id == 1 else 'N/A',
+                    'Nozzle 2 (X,Y)': f"({nozzle_pos[0]:.3f}, {nozzle_pos[1]:.3f})" if active_id == 2 else 'N/A',
+                    'Nozzle 2 Radius': f"{nozzle_r:.3f}" if active_id == 2 else 'N/A',
+                    'Nozzle 3 (X,Y)': f"({nozzle_pos[0]:.3f}, {nozzle_pos[1]:.3f})" if active_id == 3 else 'N/A',
+                    'Nozzle 3 Radius': f"{nozzle_r:.3f}" if active_id == 3 else 'N/A',
                 }
                 row_data.update(radial_counts)
                 report_data.append(row_data)
