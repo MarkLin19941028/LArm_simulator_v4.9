@@ -72,7 +72,8 @@ def _numba_evolve_grid(etch_matrix, film_matrix, conc_matrix,
                        dt, base_spin_decay, chem_decay_tau, 
                        saturation_h, wafer_radius, 
                        geo_smoothing, sat_threshold,
-                       current_rpm, shear_coeff):
+                       current_rpm, shear_coeff,
+                       global_scale):
     """
     全網格演化：新增相對速度 (剪切應力) 加成。
     """
@@ -110,7 +111,7 @@ def _numba_evolve_grid(etch_matrix, film_matrix, conc_matrix,
                 shear_factor = 1.0 + shear_coeff * v_linear
 
                 # 本幀蝕刻量 = 濃度 * 飽和因子 * 剪切因子 * 時間
-                delta_etch = c * saturation_factor * shear_factor * dt
+                delta_etch = c * saturation_factor * shear_factor * global_scale * dt
                 
                 # [新增] 飽和門檻處理 (np.tanh 限制極端值)
                 if sat_threshold > 0:
@@ -155,6 +156,7 @@ class EtchingAmountGenerator:
             config = get_default_config()
 
         # 提取參數
+        global_scale = config.get('ETCHING_GLOBAL_SCALE', 1.0)
         etch_tau = config.get('ETCHING_TAU', ETCHING_TAU) # 用於化學老化
         grid_radius = config.get('GRID_SIZE', GRID_SIZE)
         sat_h = config.get('ETCHING_SATURATION_THICKNESS', ETCHING_SATURATION_THICKNESS)
@@ -281,7 +283,8 @@ class EtchingAmountGenerator:
                 dt, current_spin_decay, etch_tau,
                 sat_h, WAFER_RADIUS,
                 geo_smoothing, sat_threshold,
-                current_rpm, shear_coeff
+                current_rpm, shear_coeff,
+                global_scale
             )
 
             if snapshot.get('is_finished') or sim_clock > (total_duration + 3.0):
