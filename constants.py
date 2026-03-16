@@ -3,7 +3,7 @@ import numpy as np
 # --- Constants ---
 WAFER_DIAMETER = 300
 WAFER_RADIUS = WAFER_DIAMETER / 2
-CHAMBER_SIZE = 450
+CHAMBER_SIZE = 560
 FPS = 30
 REPORT_FPS = 800  # 目前已根據 recipe 動態調整，這個只是預設最低數值
 NOTCH_DEPTH = 15
@@ -90,24 +90,24 @@ STATE_MOVING_FROM_CENTER_TO_START = "MOVING_FROM_CENTER_TO_START"
 
 ARM_GEOMETRIES = {
     1: {
-        "pivot": np.array([-225.0, -225.0]), 
-        "length": 318.198,
-        "home": np.array([-200.0, 94.02]),
-        "p_start": np.array([-126.241, 79.231]), 
-        "p_end": np.array([79.231, -126.241])
+        "pivot": np.array([-278.0, -265.5]), 
+        "length": 384.4,
+        "home": np.array([-247.97, 117.73]),
+        "p_start": np.array([-122.781, 86.168]), 
+        "p_end": np.array([80.432, -126.612])
     },
     2: {
-        "pivot": np.array([225.0, -225.0]), 
-        "length": 318.198,
-        "home": np.array([200.0, 94.02]),
-        "p_start": np.array([126.241, 79.231]), 
-        "p_end": np.array([-79.231, -126.241])
+        "pivot": np.array([278.0, -265.5]), 
+        "length": 384.4,
+        "home": np.array([247.97, 117.73]),
+        "p_start": np.array([122.781, 86.168]), 
+        "p_end": np.array([-80.432, -126.612])
     },
     3: {
-        "pivot": np.array([225.0, -225.0]), 
-        "length": 318.198,
-        "home": np.array([-94.02, -200.0]),
-        "p_start": np.array([-79.231, -126.241]), 
-        "p_end": np.array([126.241, 79.231])
+        "pivot": np.array([278.0, -270.5]), 
+        "length": 387.9,
+        "home": np.array([-108.71, -240.20]),
+        "p_start": np.array([-81.866, -125.714]), 
+        "p_end": np.array([123.428, 85.272])
     }
 }
