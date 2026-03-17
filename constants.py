@@ -90,18 +90,18 @@ STATE_MOVING_FROM_CENTER_TO_START = "MOVING_FROM_CENTER_TO_START"
 
 ARM_GEOMETRIES = {
     1: {
-        "pivot": np.array([-278.0, -265.5]), 
-        "length": 384.4,
-        "home": np.array([-247.97, 117.73]),
-        "p_start": np.array([-122.781, 86.168]), 
-        "p_end": np.array([80.432, -126.612])
+        "pivot": np.array([-278.0, -250.5]), 
+        "length": 374.21,
+        "home": np.array([-247.583, 122.472]),
+        "p_start": np.array([-121.323, 89.331]), 
+        "p_end": np.array([75.68, -128.255])
     },
     2: {
-        "pivot": np.array([278.0, -265.5]), 
-        "length": 384.4,
-        "home": np.array([247.97, 117.73]),
-        "p_start": np.array([122.781, 86.168]), 
-        "p_end": np.array([-80.432, -126.612])
+        "pivot": np.array([278.0, -250.5]), 
+        "length": 374.21,
+        "home": np.array([247.583, 122.472]),
+        "p_start": np.array([121.323, 89.331]), 
+        "p_end": np.array([-75.68, -128.255])
     },
     3: {
         "pivot": np.array([278.0, -270.5]), 
