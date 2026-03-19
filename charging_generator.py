@@ -126,6 +126,119 @@ class ChargingGenerator:
     def __init__(self, app_instance):
         self.app = app_instance
 
+    def run_fast_simulation(self, recipe, config):
+        """
+        Fast simulation specifically for tuning, returns radial average of surface potential
+        """
+        cond = config.get('FLUID_CONDUCTIVITY', 5.0e-12)
+        perm = config.get('FLUID_RELATIVE_PERMITTIVITY', 80.0)
+        eff_base = config.get('CHARGING_EFFICIENCY', -1.0e-10)
+        rpm_factor = config.get('CHARGING_RPM_FACTOR', 5.0)
+        diff_coeff = config.get('SURFACE_DIFFUSION_COEFF', 0.1)
+        base_spin_decay = config.get('CHARGING_BASE_SPIN_DECAY', 2.0)
+        
+        headless_arms = {}
+        for i, geo in ARM_GEOMETRIES.items():
+            headless_arms[i] = DispenseArm(i, geo['pivot'], geo['home'], geo['length'], geo['p_start'], geo['p_end'], None, None)
+                
+        water_params = self.app._get_water_params() if self.app else {
+            'viscosity': 1.0e-3, 'surface_tension': 72.8e-3, 'evaporation_rate': 0.0
+        }
+        wp_dict = {1: water_params, 2: water_params, 3: water_params}
+        
+        # [優化] 啟用 fast_mode，並設定粒子縮放比例
+        fast_particle_scale = 0.3
+        engine = SimulationEngine(recipe, headless_arms, wp_dict, headless=True, config=config, fast_mode=True, fast_particle_scale=fast_particle_scale)
+        
+        grid_size = 300
+        surface_charge = np.zeros((grid_size, grid_size), dtype=np.float64)
+        surface_buffer = np.zeros((grid_size, grid_size), dtype=np.float64)
+        liquid_charge = np.zeros((grid_size, grid_size), dtype=np.float64)
+        film_matrix = np.zeros((grid_size, grid_size), dtype=np.float64)
+
+        # [優化] AutoTune 模式下，不需要過高的 FPS，降低 FPS 以加大 dt，加速模擬
+        max_rpm = 0
+        for proc in recipe['processes']:
+            spin = proc.get('spin_params', {})
+            c_max = spin.get('rpm', 0) if spin.get('mode', 'Simple') == 'Simple' else max(spin.get('start_rpm', 0), spin.get('end_rpm', 0))
+            if float(c_max) > max_rpm: max_rpm = float(c_max)
+        
+        report_fps = max(100, int(max_rpm * 1.5))
+        recipe['dynamic_report_fps'] = report_fps
+        dt = 1.0 / report_fps
+        total_duration = sum(p['total_duration'] for p in recipe['processes'])
+        sim_clock = 0.0
+
+        while True:
+            snapshot = engine.update(dt)
+            sim_clock += dt
+            curr_rpm = abs(snapshot.get('rpm', 0))
+
+            dynamic_eff = eff_base * (1.0 + (curr_rpm / 1000.0)**2 * rpm_factor)
+            
+            on_wafer_mask = (engine.particles_state == 2)
+            if np.any(on_wafer_mask):
+                indices = np.where(on_wafer_mask)[0]
+                current_proc = recipe['processes'][snapshot['process_idx']]
+                for idx in indices:
+                    pos = engine.particles_pos[idx]
+                    
+                    p_arm_id = engine.particles_arm_id[idx]
+                    actual_flow = current_proc.get('flow_rate', 500.0)
+                    
+                    flow_scale = actual_flow / 500.0
+                    
+                    self._simple_deposit_film(film_matrix, pos[0], pos[1], 2.0, 0.005 * flow_scale)
+                    
+                    vel = engine.particles_vel[idx]
+                    # [優化] 補償減少的粒子數，確保總沉積液膜量不變 (charge_generator 的 _simple_deposit_film 已經包含 flow_scale，但我們也要對 _simple_deposit_film 做縮放)
+                    # Ah, wait, _simple_deposit_film is called before this.
+                    # Let's scale flow_scale
+                    flow_scale *= (1.0 / fast_particle_scale)
+                    
+                    self._simple_deposit_film(film_matrix, pos[0], pos[1], 2.0, 0.005 * flow_scale)
+                    
+                    vel = engine.particles_vel[idx]
+                    _numba_deposit_and_separate_charge(
+                        surface_charge, liquid_charge, film_matrix,
+                        pos[0], pos[1], vel[0], vel[1],
+                        2.0, grid_size, dt,
+                        dynamic_eff * flow_scale
+                    )
+
+            _numba_diffuse_surface(surface_charge, surface_buffer, diff_coeff, dt, 300)
+            surface_charge[:] = surface_buffer[:]
+
+            rpm = snapshot.get('rpm', 0)
+            current_spin_decay = base_spin_decay * (1.0 + abs(rpm)/500.0)
+            
+            _numba_evolve_charge(
+                liquid_charge, film_matrix, dt,
+                cond, perm, WAFER_RADIUS, current_spin_decay
+            )
+
+            if snapshot.get('is_finished') or sim_clock > total_duration + 2.0:
+                break
+                
+        potential_map = self._calculate_potential(surface_charge, config)
+        radial_avg = self.calculate_radial_average(potential_map)
+        return radial_avg, potential_map
+
+    def calculate_radial_average(self, matrix):
+        grid_size = matrix.shape[0]
+        center = grid_size / 2.0
+        y, x = np.indices(matrix.shape)
+        r = np.sqrt((x - center + 0.5)**2 + (y - center + 0.5)**2)
+        r_rounded = r.astype(int)
+        max_r = int(WAFER_RADIUS)
+        radial_sum = np.zeros(max_r + 1)
+        radial_count = np.zeros(max_r + 1)
+        mask = r_rounded <= max_r
+        np.add.at(radial_sum, r_rounded[mask], matrix[mask])
+        np.add.at(radial_count, r_rounded[mask], 1)
+        radial_avg = np.divide(radial_sum, radial_count, out=np.zeros_like(radial_sum), where=radial_count > 0)
+        return radial_avg
+
     def generate(self, recipe, filepath, config=None, progress_widgets=None, play_speed_multiplier=1.0):
         """
         執行電荷累積模擬 (解耦雙電層模型 Decoupled EDL Model)
@@ -140,13 +253,15 @@ class ChargingGenerator:
         perm = config.get('FLUID_RELATIVE_PERMITTIVITY', 80.0)
         eff_base = config.get('CHARGING_EFFICIENCY', -1.0e-10) # TEOS 通常為負
         rpm_factor = config.get('CHARGING_RPM_FACTOR', 5.0)    # RPM 增強因子
-        diff_coeff = config.get('SURFACE_DIFFUSION_COEFF', 0.1) # 擴散係數
+        diff_coeff = config.get('SURFACE_DIFFUSION_COEFF', 0.1) # 擴散係係數
         base_spin_decay = config.get('CHARGING_BASE_SPIN_DECAY', 2.0)
         
         # 2. 初始化模擬引擎
         # 為了獨立運作，我們需要自己的 SimulationEngine 來跑粒子軌跡
-        headless_arms = {i: DispenseArm(i, geo['pivot'], geo['home'], geo['length'], geo['p_start'], geo['p_end'], None, None) 
-                         for i, geo in ARM_GEOMETRIES.items()}
+        headless_arms = {}
+        for i, geo in ARM_GEOMETRIES.items():
+            headless_arms[i] = DispenseArm(i, geo['pivot'], geo['home'], geo['length'], geo['p_start'], geo['p_end'], None, None)
+                
         water_params = self.app._get_water_params() # 沿用主程式的水參數
         
         # 為了相容性，簡單包裝
@@ -230,24 +345,30 @@ class ChargingGenerator:
                         return False # 返回 False 表示生成失敗
 
             # --- A. 簡易液膜生成 (為了支撐電荷計算) ---
-            on_wafer_mask = engine.particles_state == 2 # P_ON_WAFER
+            on_wafer_mask = (engine.particles_state == 2) # P_ON_WAFER
             if np.any(on_wafer_mask):
                 indices = np.where(on_wafer_mask)[0]
+                current_proc = recipe['processes'][snapshot['process_idx']]
                 for idx in indices:
                     pos = engine.particles_pos[idx]
-                    self._simple_deposit_film(self.film_matrix, pos[0], pos[1], 2.0, 0.005) # 2mm半徑, 0.005厚度增量
-            
-            # --- B. 電荷分離沉積 [改良點 2] ---
-            if np.any(on_wafer_mask):
-                indices = np.where(on_wafer_mask)[0]
-                for idx in indices:
-                    pos = engine.particles_pos[idx]
+                    
+                    # [修正] 考慮噴嘴流量對液膜與電荷的影響
+                    p_arm_id = engine.particles_arm_id[idx]
+                    actual_flow = current_proc.get('flow_rate', 500.0)
+                    
+                    # 流量基礎係數 (以 500mL/min 為基準)
+                    flow_scale = actual_flow / 500.0
+                    
+                    # A. 沉積液膜
+                    self._simple_deposit_film(self.film_matrix, pos[0], pos[1], 2.0, 0.005 * flow_scale)
+                    
+                    # B. 電荷分離沉積
                     vel = engine.particles_vel[idx]
                     _numba_deposit_and_separate_charge(
                         self.surface_charge, self.liquid_charge, self.film_matrix,
                         pos[0], pos[1], vel[0], vel[1],
                         2.0, grid_size, dt,
-                        dynamic_eff
+                        dynamic_eff * flow_scale
                     )
 
             # --- C. 表面擴散 (平滑化) [改良點 3] ---

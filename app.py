@@ -7,6 +7,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.ticker import FixedLocator, FixedFormatter
 import matplotlib.animation as animation
 import matplotlib.transforms
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 import time
 import numpy as np
 import math
@@ -30,6 +31,7 @@ from PRE_generator import PREGenerator
 from charging_generator import ChargingGenerator
 from moving_pattern import MovingPatternGenerator
 from simulation_config_def import PARAMETER_DEFINITIONS, get_default_config
+from AutoTuner import AutoTunerGUI
 
 class WaterColumn:
     def __init__(self, ax, flow_rate_ml_per_min):
@@ -346,20 +348,26 @@ class SimulationApp:
         # 連結到外部recipe_manager
         ttk.Button(io_frame, text="Import Recipe", command=self.recipe_manager.import_recipe).pack(side="left", padx=5)
         ttk.Button(io_frame, text="Export Recipe", command=self.recipe_manager.export_recipe).pack(side="left", padx=5)
+        
+        self.current_recipe_file_var = tk.StringVar(value="No recipe imported")
+        lbl_current_recipe = ttk.Label(io_frame, textvariable=self.current_recipe_file_var, foreground="gray")
+        lbl_current_recipe.pack(side="left", padx=15)
 
         report_frame = ttk.LabelFrame(content_frame, text="Reporting", padding="10")
         report_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), padx=5, pady=5)
         
-        # Row 1
-        ttk.Button(report_frame, text="Simulation Report", command=self.export_simulation_report).grid(row=0, column=0, padx=5, pady=2, sticky="ew")
-        ttk.Button(report_frame, text="Generate Video", command=self.export_simulation_video).grid(row=0, column=1, padx=5, pady=2, sticky="ew")
-        ttk.Button(report_frame, text="Moving Pattern", command=self.export_nozzle_pattern).grid(row=0, column=2, padx=5, pady=2, sticky="ew")
+        # 第一列：基礎報告與工具
+        ttk.Button(report_frame, text="Simulation Report", width=20, command=self.export_simulation_report).grid(row=0, column=0, padx=5, pady=2, sticky="w")
+        ttk.Button(report_frame, text="Generate Video", width=20, command=self.export_simulation_video).grid(row=0, column=1, padx=5, pady=2, sticky="w")
+        ttk.Button(report_frame, text="Moving Pattern", width=20, command=self.moving_pattern_generator.export_nozzle_pattern).grid(row=0, column=2, padx=5, pady=2, sticky="w")
+        ttk.Button(report_frame, text="Accumulation Heatmap", width=20, command=self.export_accumulation_heatmap).grid(row=0, column=3, padx=5, pady=2, sticky="w")
         
-        # Row 2
-        ttk.Button(report_frame, text="Accumulation Heatmap", command=self.export_accumulation_heatmap).grid(row=1, column=0, padx=5, pady=2, sticky="ew")
-        ttk.Button(report_frame, text="Etching Amount", command=self.export_etching_amount).grid(row=1, column=1, padx=5, pady=2, sticky="ew")
-        ttk.Button(report_frame, text="Particle Removal", command=self.export_pre_efficiency).grid(row=1, column=2, padx=5, pady=2, sticky="ew")
-        ttk.Button(report_frame, text="Charging", command=self.export_charging_simulation).grid(row=1, column=3, padx=5, pady=2, sticky="ew")
+        # 第二列：進階分析與調校工具
+        ttk.Button(report_frame, text="Etching Amount", width=20, command=self.export_etching_amount).grid(row=1, column=0, padx=5, pady=2, sticky="w")
+        ttk.Button(report_frame, text="Particle Removal", width=20, command=self.export_pre_efficiency).grid(row=1, column=1, padx=5, pady=2, sticky="w")
+        ttk.Button(report_frame, text="Charging", width=20, command=self.export_charging_simulation).grid(row=1, column=2, padx=5, pady=2, sticky="w")
+        ttk.Button(report_frame, text="AutoTune", width=20, command=self.open_autotuner).grid(row=1, column=3, padx=5, pady=2, sticky="w")
+
         global_frame = ttk.LabelFrame(content_frame, text="Global Parameters", padding="10")
         global_frame.grid(row=2, column=0, sticky=(tk.W, tk.E), padx=5, pady=5)
         ttk.Label(global_frame, text="Wafer Spin Direction:").grid(row=0, column=0, sticky=tk.W, pady=2)
@@ -438,6 +446,8 @@ class SimulationApp:
         for child in proc_data['steps_container'].winfo_children():
             child.config(state=new_state)
 
+        proc_data['flow_label_var'].set(f"{arm_str} Flow:" if arm_str != 'None' else "Flow:")
+
     def recreate_process_widgets(self, *args, imported_data=None):
         for widget in self.processes_container.winfo_children(): widget.destroy()
         self.processes_data = []
@@ -453,15 +463,17 @@ class SimulationApp:
             arm_menu.grid(row=0, column=1, sticky=tk.W)
             
             # Flow Rate for this process
-            ttk.Label(proc_params_frame, text="Flow (mL/min):").grid(row=0, column=2, sticky=tk.W, padx=(10, 5))
+            flow_label_var = tk.StringVar(value="Arm 1 Flow:")
+            flow_label = ttk.Label(proc_params_frame, textvariable=flow_label_var)
+            flow_label.grid(row=0, column=2, sticky=tk.W, padx=(10, 5))
             flow_rate_var = tk.StringVar(value='1500')
             flow_rate_spinbox = ttk.Spinbox(
-                proc_params_frame, from_=10, to=3000, increment=10,
+                proc_params_frame, from_=0, to=3000, increment=10,
                 textvariable=flow_rate_var, width=8
             )
             flow_rate_spinbox.grid(row=0, column=3, sticky=tk.W)
             flow_rate_spinbox.bind('<FocusOut>', lambda event, v=flow_rate_var, idx=i: self._validate_value_with_warning(
-                v, 10.0, 3000.0, f"Process {idx+1} Flow Rate"
+                v, 0.0, 3000.0, f"Process {idx+1} Flow Rate"
             ))
 
             ttk.Label(proc_params_frame, text="Total Process Time (s):").grid(row=1, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
@@ -487,6 +499,7 @@ class SimulationApp:
                 'arm_var': arm_var, 
                 'flow_rate_var': flow_rate_var,
                 'flow_rate_spinbox': flow_rate_spinbox,
+                'flow_label_var': flow_label_var,
                 'duration_var': duration_var, 
                 'spin_mode_var': spin_mode_var, 
                 'simple_rpm_var': tk.StringVar(value='300'), 
@@ -1049,66 +1062,13 @@ class SimulationApp:
         finally:
             self._charging_export_lock = False
 
-    def export_nozzle_pattern(self):
-        parsed_recipe = self.parse_and_prepare_recipe()
-        if not parsed_recipe: return
-
-        user_path = filedialog.asksaveasfilename(
-            defaultextension=".png",
-            filetypes=[("PNG Image", "*.png"), ("All Files", "*.*")],
-            title="Export Moving Pattern Image As..."
-        )
-        if not user_path: return
-
-        # 套用命名規範
-        base_path, ext = os.path.splitext(user_path)
-        if ext.lower() not in ['.png', '.jpg', '.jpeg']:
-            ext = '.png'
-        filepath_img = f"{base_path}_Moving_Pattern{ext}"
-        filepath_vid = f"{base_path}_Moving_Pattern.mp4"
-
-        progress_window = tk.Toplevel(self.root)
-        progress_window.title("Generating Pattern & Video")
-        progress_window.geometry("400x120")
-        progress_window.transient(self.root)
-        progress_window.grab_set()
-        progress_window.resizable(False, False)
-        ttk.Label(progress_window, text="Generating moving pattern image, please wait...", padding=10).pack()
-
-        total_duration = sum(p['total_duration'] for p in parsed_recipe['processes'])
-        if total_duration <= 0: total_duration = 1.0
-
-        progress_label = ttk.Label(progress_window, text=f"Processing Time: 0.0s / {total_duration:.1f}s (0%)", padding=(0, 5))
-        progress_label.pack()
-        progress_bar = ttk.Progressbar(progress_window, orient="horizontal", length=350, mode="determinate", maximum=total_duration)
-        progress_bar.pack(pady=10)
-        progress_widgets = {'window': progress_window, 'bar': progress_bar, 'label': progress_label}
-
-        try:
-            try:
-                current_multiplier = float(self.speed_var.get().replace('x', ''))
-            except (AttributeError, ValueError):
-                current_multiplier = 1.0
-            current_config = self.get_current_config()
-
-            self.moving_pattern_generator.generate(
-                parsed_recipe, filepath_img, filepath_vid, 
-                config=current_config, progress_widgets=progress_widgets, 
-                play_speed_multiplier=current_multiplier
-            )
-            messagebox.showinfo("Success", f"Moving Pattern and Video exported successfully to:\n{filepath_img}\n{filepath_vid}")
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to generate pattern and video: {e}")
-        finally:
-            if progress_window.winfo_exists():
-                progress_window.destroy()
-
     def _run_headless_simulation(self, recipe, progress_widgets=None):
         current_config = self.get_current_config()
         max_speed = current_config.get('MAX_NOZZLE_SPEED_MMS', 250.0)
 
-        headless_arms = {i: DispenseArm(i, geo['pivot'], geo['home'], geo['length'], geo['p_start'], geo['p_end'], None, None, max_nozzle_speed_mms=max_speed) 
-                         for i, geo in ARM_GEOMETRIES.items()}
+        headless_arms = {}
+        for i, geo in ARM_GEOMETRIES.items():
+            headless_arms[i] = DispenseArm(i, geo['pivot'], geo['home'], geo['length'], geo['p_start'], geo['p_end'], None, None, max_nozzle_speed_mms=max_speed)
 
         global_water_params = self._get_water_params()
         water_params_dict = {i: {
@@ -1166,6 +1126,35 @@ class SimulationApp:
                         except: pass
 
                 nozzle_pos = snapshot['nozzle_pos']
+                
+                # Initialize nozzle data
+                n1_pos_str, n1_rad_str = 'N/A', 'N/A'
+                n2_pos_str, n2_rad_str = 'N/A', 'N/A'
+                n3_pos_str, n3_rad_str = 'N/A', 'N/A'
+                
+                active_arm = snapshot['active_arm_id']
+                if active_arm == 1:
+                    # Arm 1 contains Nozzle 1
+                    pos = nozzle_pos
+                    rad = np.linalg.norm(pos)
+                    n1_pos_str = f"({pos[0]:.3f}, {pos[1]:.3f})"
+                    n1_rad_str = f"{rad:.3f}"
+                elif active_arm == 2:
+                    # Arm 2 contains Nozzle 2 (main) and Nozzle 3 (side)
+                    if isinstance(nozzle_pos, list) and len(nozzle_pos) == 2:
+                        p2, p3 = nozzle_pos
+                        rad2, rad3 = np.linalg.norm(p2), np.linalg.norm(p3)
+                        n2_pos_str = f"({p2[0]:.3f}, {p2[1]:.3f})"
+                        n2_rad_str = f"{rad2:.3f}"
+                        n3_pos_str = f"({p3[0]:.3f}, {p3[1]:.3f})"
+                        n3_rad_str = f"{rad3:.3f}"
+                    else:
+                        # Fallback if for some reason it's not a list
+                        pos = nozzle_pos
+                        rad = np.linalg.norm(pos)
+                        n2_pos_str = f"({pos[0]:.3f}, {pos[1]:.3f})"
+                        n2_rad_str = f"{rad:.3f}"
+
                 # 優化：直接從 NumPy 陣列過濾在晶圓上的粒子座標
                 on_wafer_mask = engine.particles_state == 2 # P_ON_WAFER
                 all_on_wafer_coords = engine.particles_pos[on_wafer_mask, :2]
@@ -1173,23 +1162,20 @@ class SimulationApp:
                 # 使用使用者自定義的徑向間隔
                 radial_interval = current_config.get('REPORT_INTERVAL_MM', 2.0)
                 radial_counts = calculate_water_counts_by_radius(all_on_wafer_coords, WAFER_RADIUS, radial_interval)
-                
-                active_id = snapshot['active_arm_id']
-                nozzle_r = np.linalg.norm(nozzle_pos) if active_id != 0 else 0.0
 
                 row_data = {
                     'Time Elapsed': f"{snapshot['time']:.2f}",
                     'Process Recipe Number': snapshot['process_idx'] + 1,
-                    'Dispense Arm Number': active_id if active_id != 0 else 'N/A',
+                    'Dispense Arm Number': active_arm if active_arm != 0 else 'N/A',
                     'State': snapshot['state'],
                     'Process Time': "Running" if snapshot['state'] in [STATE_RUNNING_PROCESS, STATE_MOVING_FROM_CENTER_TO_START] else "N/A",
                     'Spin speed': f"{snapshot['rpm']:.2f}",
-                    'Nozzle 1 (X,Y)': f"({nozzle_pos[0]:.3f}, {nozzle_pos[1]:.3f})" if active_id == 1 else 'N/A',
-                    'Nozzle 1 Radius': f"{nozzle_r:.3f}" if active_id == 1 else 'N/A',
-                    'Nozzle 2 (X,Y)': f"({nozzle_pos[0]:.3f}, {nozzle_pos[1]:.3f})" if active_id == 2 else 'N/A',
-                    'Nozzle 2 Radius': f"{nozzle_r:.3f}" if active_id == 2 else 'N/A',
-                    'Nozzle 3 (X,Y)': f"({nozzle_pos[0]:.3f}, {nozzle_pos[1]:.3f})" if active_id == 3 else 'N/A',
-                    'Nozzle 3 Radius': f"{nozzle_r:.3f}" if active_id == 3 else 'N/A',
+                    'Nozzle 1 (X,Y)': n1_pos_str,
+                    'Nozzle 1 Radius': n1_rad_str,
+                    'Nozzle 2 (X,Y)': n2_pos_str,
+                    'Nozzle 2 Radius': n2_rad_str,
+                    'Nozzle 3 (X,Y)': n3_pos_str,
+                    'Nozzle 3 Radius': n3_rad_str,
                 }
                 row_data.update(radial_counts)
                 report_data.append(row_data)
@@ -1253,7 +1239,7 @@ class SimulationApp:
             except: pass
             finally: self.ani = None
         global_water_params = self._get_water_params()
-        water_params_dict = {arm_id: {'viscosity': global_water_params['viscosity'], 'surface_tension': global_water_params['surface_tension'], 'evaporation_rate': global_water_params['evaporation_rate']} for arm_id in [1, 2, 3]}
+        water_params_dict = {nozzle_id: {'viscosity': global_water_params['viscosity'], 'surface_tension': global_water_params['surface_tension'], 'evaporation_rate': global_water_params['evaporation_rate']} for nozzle_id in [1, 2, 3]}
         self.display_water_var.set(True)
         if not self.sim_window or not self.sim_window.winfo_exists(): self.create_simulator_window()
         
@@ -1289,10 +1275,9 @@ class SimulationApp:
         max_speed = config.get('MAX_NOZZLE_SPEED_MMS', 250.0)
         
         self.arms = {}
-        for i in range(1, 4):
+        for i, geo in ARM_GEOMETRIES.items():
             arm_line, = ax.plot([], [])
             nozzle_head = plt.Circle((0, 0), 10)
-            geo = ARM_GEOMETRIES[i]
             self.arms[i] = DispenseArm(i, geo['pivot'], geo['home'], geo['length'], geo['p_start'], geo['p_end'], arm_line, nozzle_head, max_nozzle_speed_mms=max_speed)
 
     def _on_simulator_close(self):
@@ -1313,7 +1298,8 @@ class SimulationApp:
     def create_simulator_window(self):
         self.sim_window = tk.Toplevel(self.root)
         self.sim_window.title("Simulator")
-        self.sim_window.geometry("800x700")
+        # 調整視窗為接近 700x450 比例的大小，例如 840x540 或 900x600 加上控制區高度
+        self.sim_window.geometry("900x650")
         self.sim_window.resizable(False, False)
         self.sim_window.protocol("WM_DELETE_WINDOW", self._on_simulator_close)
         sim_control_frame = ttk.Frame(self.sim_window, padding=5)
@@ -1330,7 +1316,8 @@ class SimulationApp:
         ttk.Button(sim_control_frame, text=">>", width=3, command=lambda: self._adjust_speed(1)).pack(side="left", padx=2)
         self.speed_options = ["0.1x", "0.25x", "0.5x", "1x", "1.25x", "1.5x", "2x", "5x", "10x", "20x"]
         self.speed_idx = 3 
-        self.fig = Figure(figsize=(6, 6), dpi=100)
+        # 修改長寬比以符合 700x450
+        self.fig = Figure(figsize=(7, 4.5), dpi=100)
         self.ax = self.fig.add_subplot(111)
         self.canvas = FigureCanvasTkAgg(self.fig, master=self.sim_window)
         self.canvas.get_tk_widget().pack(side="top", fill="both", expand=True)
@@ -1354,26 +1341,27 @@ class SimulationApp:
 
     def init_plot(self):
         self.ax.clear(); self.ax.set_aspect('equal', 'box'); self.ax.set_facecolor('black')
-        self.ax.set_xlim(-CHAMBER_SIZE / 2, CHAMBER_SIZE / 2); self.ax.set_ylim(-CHAMBER_SIZE / 2, CHAMBER_SIZE / 2)
-        self.ax.add_patch(plt.Rectangle((-CHAMBER_SIZE / 2, -CHAMBER_SIZE / 2), CHAMBER_SIZE, CHAMBER_SIZE, facecolor='none', edgecolor='gray', lw=2))
+        # 修改顯示範圍為寬 700，高 450 (-350~350, -225~225)
+        self.ax.set_xlim(-350, 350); self.ax.set_ylim(-300, 225)
+        self.ax.add_patch(plt.Rectangle((-350, -300), 700, 525, facecolor='none', edgecolor='gray', lw=2))
         self.ax.add_patch(plt.Circle((0, 0), WAFER_RADIUS, facecolor='#222222', edgecolor='cyan', lw=1.5, zorder=1))
         self.ax.add_patch(plt.Circle((0, 0), 3, color='cyan', zorder=2))
         self.notch_patch = plt.Polygon([[0, 0], [0, 0], [0, 0]], closed=True, facecolor='black', edgecolor='cyan', lw=1.5, zorder=2)
         self.ax.add_patch(self.notch_patch)
-        mask_inner, mask_outer = WAFER_RADIUS + 10, CHAMBER_SIZE / 2
+        mask_inner, mask_outer = WAFER_RADIUS + 10, max(350, 225)
         self.ax.add_patch(patches.Wedge((0, 0), mask_outer, 0, 360, width=mask_outer - mask_inner, facecolor='black', zorder=11))
         
         current_config = self.get_current_config()
         max_speed = current_config.get('MAX_NOZZLE_SPEED_MMS', 250.0)
         
-        self.arms = {}; arm_colors = {1: 'lime', 2: 'magenta', 3: 'yellow'}
-        for i in range(1, 4):
+        self.arms = {}; arm_colors = {1: 'lime', 2: 'magenta', 3: 'cyan'}
+        for i, geo in ARM_GEOMETRIES.items():
             arm_line, = self.ax.plot([], [], color='gray', lw=4, visible=False, zorder=12)
             nozzle_head = plt.Circle((0, 0), 10, facecolor=arm_colors[i], visible=False, zorder=13)
             self.ax.add_patch(nozzle_head)
-            geo = ARM_GEOMETRIES[i]
             self.arms[i] = DispenseArm(i, geo['pivot'], geo['home'], geo['length'], geo['p_start'], geo['p_end'], arm_line, nozzle_head, max_nozzle_speed_mms=max_speed)
-        self.water_columns = {i: WaterColumn(self.ax, 500.0) for i in range(1, 4)}
+        # 建立 WaterColumn，包含主 nozzle 與附加的 nozzle 3
+        self.water_columns = {1: WaterColumn(self.ax, 500.0), 2: WaterColumn(self.ax, 500.0), 3: WaterColumn(self.ax, 500.0)}
         self.status_text = self.ax.text(0.02, 0.98, '', transform=self.ax.transAxes, fontdict={'family': 'serif', 'color': 'white', 'verticalalignment': 'top', 'size': 11}, zorder=20)
         return []
 
@@ -1404,8 +1392,9 @@ class SimulationApp:
             else: arm.go_home()
         water_render_data = snapshot.get('water_render', {})
         if self.display_water_var.get():
-            for arm_id, data in water_render_data.items():
-                if arm_id in self.water_columns: self.water_columns[arm_id].draw(data.get('falling', []), data.get('on_wafer', []))
+            for source_id, data in water_render_data.items():
+                if source_id in self.water_columns: 
+                    self.water_columns[source_id].draw(data.get('falling', []), data.get('on_wafer', []))
         else:
             for wc in self.water_columns.values(): wc.clear()
         if hasattr(self, 'wafer_plot'):
@@ -1434,6 +1423,10 @@ class SimulationApp:
             if hasattr(wc, 'artist'): artists.append(wc.artist)
             if hasattr(wc, 'on_wafer_artist'): artists.append(wc.on_wafer_artist)
         return artists
+
+    def open_autotuner(self):
+        tuner_window = tk.Toplevel(self.root)
+        AutoTunerGUI(tuner_window, main_app=self)
 
     def on_closing(self):
         try:

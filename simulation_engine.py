@@ -155,10 +155,10 @@ def _physics_kernel(states, pos, vel, last_pos, life, time_on_wafer, path_length
                 eff_film_thinning = 1.0 + film_thinning_factor * (dist / wafer_radius)
                 
                 effective_visc = viscosities[arm_id] * visc_dry_factor * eff_film_thinning
-                damping_val = visc_damping * effective_visc * dt
-                # 阻尼限幅，確保數值穩定 (不超過 0.9)
-                if damping_val > 0.9: damping_val = 0.9
-                damping = 1.0 - damping_val
+                
+                # [修正] 採用指數衰減，確保大 dt 下的數值穩定性，不會產生過度減速或震盪
+                damping_exp = visc_damping * effective_visc * dt
+                damping = math.exp(-damping_exp)
                 
                 vel[i, 0] *= damping
                 vel[i, 1] *= damping
@@ -177,12 +177,14 @@ def _physics_kernel(states, pos, vel, last_pos, life, time_on_wafer, path_length
 
 
 class SimulationEngine:
-    def __init__(self, recipe, arms_dict, water_params_dict, headless=False, config=None):
+    def __init__(self, recipe, arms_dict, water_params_dict, headless=False, config=None, fast_mode=False, fast_particle_scale=0.5):
         self.recipe = recipe
         self.arms = arms_dict
         self.water_params = water_params_dict
         self.headless = headless
         self.config = config if config else {}
+        self.fast_mode = fast_mode
+        self.fast_particle_scale = fast_particle_scale
 
         self.simulation_mode = self.config.get('SIMULATION_MODE', 'full')
         self.max_nozzle_speed_mms = self.config.get('MAX_NOZZLE_SPEED_MMS', 250.0)
@@ -215,7 +217,7 @@ class SimulationEngine:
         self.particles_id = np.zeros(self.max_particles, dtype=np.int32)
         
         self.next_particle_id = 0
-        self._spawn_accumulator = {arm_id: 0.0 for arm_id in arms_dict.keys()}
+        self._spawn_accumulator = {arm_id: 0.0 for arm_id in [1, 2, 3]} # 預留 3 個來源
         
         self.viscosities = np.ones(10, dtype=np.float64)
         self.evap_rates = np.zeros(10, dtype=np.float64)
@@ -236,7 +238,7 @@ class SimulationEngine:
 
     @property
     def particle_systems(self):
-        systems = {arm_id: [] for arm_id in self.arms.keys()}
+        systems = {arm_id: [] for arm_id in [1, 2, 3]}
         for i in range(self.max_particles):
             state_val = self.particles_state[i]
             if state_val == P_INACTIVE:
@@ -279,7 +281,9 @@ class SimulationEngine:
         else:
             arm = self.arms[self.active_arm_id]
             self.animation_state = STATE_ARM_MOVE_FROM_HOME
-            self.last_nozzle_pos = arm.home_pos.copy()
+            # 支援 list (Arm 2) 或是單一 array
+            home_coords = arm.angle_to_coords(arm.home_angle)
+            self.last_nozzle_pos = [c.copy() for c in home_coords] if isinstance(home_coords, list) else home_coords.copy()
             self.transition_start_time = 0.0
             self.transition_start_angle = arm.home_angle
             
@@ -313,17 +317,31 @@ class SimulationEngine:
         spin_dir = self.recipe.get('spin_dir', 'cw')
 
         if self.simulation_mode == 'full':
-            # [優化] 動態計算子步數，與 WATER_RENDER_INTERPOLATION_LIMIT 掛鉤，改善高轉速連續性
-            SUB_STEPS = max(5, min(WATER_RENDER_INTERPOLATION_LIMIT, 5 + int(current_rpm / 40)))
+            if self.fast_mode:
+                # [優化] AutoTune 快速模式，忽略渲染連續性，確保物理計算穩定即可
+                SUB_STEPS = max(1, min(3, int(current_rpm / 300)))
+            else:
+                # [優化] 動態計算子步數，與 WATER_RENDER_INTERPOLATION_LIMIT 掛鉤，改善高轉速連續性
+                SUB_STEPS = max(5, min(WATER_RENDER_INTERPOLATION_LIMIT, 5 + int(current_rpm / 40)))
+            
             sub_dt = dt / SUB_STEPS
             
             omega = (current_rpm / 60.0) * 2 * math.pi * (-1 if spin_dir == 'cw' else 1)
             direction_mult = -1 if spin_dir == 'cw' else 1
             
-            last_sub_nozzle_pos = self.prev_nozzle_pos.copy()
+            # 複製 prev_nozzle_pos，處理 list 格式
+            last_sub_nozzle_pos = [c.copy() for c in self.prev_nozzle_pos] if isinstance(self.prev_nozzle_pos, list) else self.prev_nozzle_pos.copy()
             for i in range(SUB_STEPS):
                 frac = (i + 1) / SUB_STEPS
-                curr_sub_nozzle_pos = self.prev_nozzle_pos + (self.last_nozzle_pos - self.prev_nozzle_pos) * frac
+                
+                # 計算子步插值 (處理 list 格式)
+                if isinstance(self.prev_nozzle_pos, list):
+                    curr_sub_nozzle_pos = [
+                        self.prev_nozzle_pos[j] + (self.last_nozzle_pos[j] - self.prev_nozzle_pos[j]) * frac
+                        for j in range(len(self.prev_nozzle_pos))
+                    ]
+                else:
+                    curr_sub_nozzle_pos = self.prev_nozzle_pos + (self.last_nozzle_pos - self.prev_nozzle_pos) * frac
 
                 # 計算子步的晶圓角度，用於物理核心的 Impact 座標轉換
                 curr_sub_angle = self.wafer_angle + (current_rpm / 60.0 * 360.0 * (i * sub_dt)) * direction_mult
@@ -346,7 +364,7 @@ class SimulationEngine:
                     self.visc_damping, self.film_thinning_factor, self.drying_visc_mult,
                     self.rpm_evap_coeff
                 )
-                last_sub_nozzle_pos = curr_sub_nozzle_pos.copy()
+                last_sub_nozzle_pos = [c.copy() for c in curr_sub_nozzle_pos] if isinstance(curr_sub_nozzle_pos, list) else curr_sub_nozzle_pos.copy()
 
         if self.animation_state == STATE_RUNNING_PROCESS:
             if wall_time_in_proc >= current_process.get('total_duration', 0):
@@ -373,7 +391,8 @@ class SimulationEngine:
         self.current_notch_coords = np.dot(base_notch, rot_matrix.T)
 
         if self.simulation_mode == 'full':
-            render_data = {arm_id: self._get_render_paths(arm_id, dt, current_rpm, spin_dir) for arm_id in self.arms.keys()}
+            # 我們需要收集 arm_id=1, 2, 3 的渲染資料，因為 Arm 2 包含了 nozzle 3
+            render_data = {arm_id: self._get_render_paths(arm_id, dt, current_rpm, spin_dir) for arm_id in [1, 2, 3]}
         else:
             render_data = {}
 
@@ -399,6 +418,11 @@ class SimulationEngine:
             if not is_finished:
                 self.simulation_time_elapsed += dt
 
+        # 獲取當前製程的噴嘴流量資訊
+        current_flows = {1: 0.0, 2: 0.0, 3: 0.0}
+        if self.animation_state == STATE_RUNNING_PROCESS:
+            current_flows[self.active_arm_id] = current_process.get('flow_rate', 0.0)
+
         return {
             'time': self.simulation_time_elapsed,
             'state': self.animation_state,
@@ -412,6 +436,7 @@ class SimulationEngine:
             'step_str': self.current_step_label,
             'water_render': render_data,
             'is_spraying': (self.animation_state == STATE_RUNNING_PROCESS),
+            'nozzle_flows': current_flows,
             'removed_particles': [],
             'is_finished': is_finished
         }
@@ -443,67 +468,83 @@ class SimulationEngine:
     def _spawn_particles(self, arm_id, dt, custom_pos=None, prev_sub_pos=None):
         """
         [修正] 生成粒子時，直接使用「絕對座標 (World Coordinates)」。
-        並實施 Time Smearing 優化連續性。
+        並實施 Time Smearing 優化連續性。支援多噴嘴同時噴灑。
         """
         current_process = self.recipe['processes'][self.current_process_index]
-        flow = current_process.get('flow_rate', 500.0)
-        params = self.water_params.get(arm_id, {})
-        st_val = params.get('surface_tension', 72.8)
-        spread_base = self.spray_spread_base / (st_val + 10.0) 
         
-        # 使用 PARTICLE_SPAWN_MULTIPLIER 調整粒子生成密度
-        expected_particles = (flow * 0.5 * PARTICLE_SPAWN_MULTIPLIER) * dt
-        self._spawn_accumulator[arm_id] += expected_particles
+        # 決定有幾個來源
+        sources = [] # list of dicts: {'id', 'flow', 'start_pos', 'end_pos'}
         
-        count = int(self._spawn_accumulator[arm_id])
-        self._spawn_accumulator[arm_id] -= count 
-        
-        if count <= 0: return
-        
-        # 決定噴嘴基準位置 (插值區間)
         nozzle_end = custom_pos if custom_pos is not None else self.last_nozzle_pos
         nozzle_start = prev_sub_pos if prev_sub_pos is not None else self.prev_nozzle_pos
-        
-        inactive_indices = np.where(self.particles_state == P_INACTIVE)[0]
-        if len(inactive_indices) == 0: return
-        
-        spawn_count = min(count, len(inactive_indices))
-        target_indices = inactive_indices[:spawn_count]
-        
-        for i, idx in enumerate(target_indices):
-            t_frac = (i + random.random()) / spawn_count
-            spawn_time_offset = t_frac * dt
+
+        sources.append({'id': arm_id, 'flow': current_process.get('flow_rate', 500.0), 'start_pos': nozzle_start, 'end_pos': nozzle_end})
+
+        for source in sources:
+            src_id = source['id']
+            flow = source['flow']
+            if flow <= 0: continue
             
-            self.particles_state[idx] = P_FALLING
-            self.particles_life[idx] = 1.0
-            self.particles_birth_time[idx] = self.simulation_time_elapsed + spawn_time_offset
-            self.particles_time_on_wafer[idx] = 0.0
-            self.particles_path_length[idx] = 0.0
-            self.particles_arm_id[idx] = arm_id
-            self.particles_id[idx] = self.next_particle_id
+            params = self.water_params.get(src_id, {})
+            st_val = params.get('surface_tension', 72.8)
+            spread_base = self.spray_spread_base / (st_val + 10.0) 
             
-            # [優化] 實施 Time Smearing：
-            # 1. 插值水平位置 (噴嘴移動路徑)
-            interp_nozzle = nozzle_start + (nozzle_end - nozzle_start) * t_frac
-            off = (np.random.rand(2) - 0.5) * spread_base
+            # 使用 PARTICLE_SPAWN_MULTIPLIER 調整粒子生成密度
+            expected_particles = (flow * 0.5 * PARTICLE_SPAWN_MULTIPLIER) * dt
             
-            # 2. 插值垂直位置 (下落連續性)
-            # 初速設定 (向下為負)
-            self.particles_vel[idx] = [0.0, 0.0, -flow * self.jet_speed_factor]
+            if hasattr(self, 'fast_mode') and self.fast_mode:
+                expected_particles *= self.fast_particle_scale
+                
+            self._spawn_accumulator[src_id] += expected_particles
             
-            # 補償計算：為了抵消後續物理步進的影響，較晚出生的粒子初始高度應稍微調高
-            # z_start = H + v_z_speed * t_offset = H - vel_z * t_offset
-            v_z_initial = self.particles_vel[idx, 2]
-            z_offset = -v_z_initial * spawn_time_offset
+            count = int(self._spawn_accumulator[src_id])
+            self._spawn_accumulator[src_id] -= count 
             
-            self.particles_pos[idx] = [
-                interp_nozzle[0] + off[0], 
-                interp_nozzle[1] + off[1], 
-                NOZZLE_Z_HEIGHT + z_offset
-            ]
-            self.particles_last_pos[idx] = self.particles_pos[idx, :2]
+            if count <= 0: continue
             
-            self.next_particle_id += 1
+            inactive_indices = np.where(self.particles_state == P_INACTIVE)[0]
+            if len(inactive_indices) == 0: continue
+            
+            spawn_count = min(count, len(inactive_indices))
+            target_indices = inactive_indices[:spawn_count]
+            
+            n_start = source['start_pos']
+            n_end = source['end_pos']
+            
+            for i, idx in enumerate(target_indices):
+                t_frac = (i + random.random()) / spawn_count
+                spawn_time_offset = t_frac * dt
+                
+                self.particles_state[idx] = P_FALLING
+                self.particles_life[idx] = 1.0
+                self.particles_birth_time[idx] = self.simulation_time_elapsed + spawn_time_offset
+                self.particles_time_on_wafer[idx] = 0.0
+                self.particles_path_length[idx] = 0.0
+                self.particles_arm_id[idx] = src_id
+                self.particles_id[idx] = self.next_particle_id
+                
+                # [優化] 實施 Time Smearing：
+                # 1. 插值水平位置 (噴嘴移動路徑)
+                interp_nozzle = n_start + (n_end - n_start) * t_frac
+                off = (np.random.rand(2) - 0.5) * spread_base
+                
+                # 2. 插值垂直位置 (下落連續性)
+                # 初速設定 (向下為負)
+                self.particles_vel[idx] = [0.0, 0.0, -flow * self.jet_speed_factor]
+                
+                # 補償計算：為了抵消後續物理步進的影響，較晚出生的粒子初始高度應稍微調高
+                # z_start = H + v_z_speed * t_offset = H - vel_z * t_offset
+                v_z_initial = self.particles_vel[idx, 2]
+                z_offset = -v_z_initial * spawn_time_offset
+                
+                self.particles_pos[idx] = [
+                    interp_nozzle[0] + off[0], 
+                    interp_nozzle[1] + off[1], 
+                    NOZZLE_Z_HEIGHT + z_offset
+                ]
+                self.particles_last_pos[idx] = self.particles_pos[idx, :2]
+                
+                self.next_particle_id += 1
 
     def _get_render_paths(self, arm_id, dt, rpm, spin_dir):
         """
