@@ -48,6 +48,8 @@ class RecipeManager:
                     arm_str = proc_data['arm_var'].get()
                     writer.writerow(["dispense_arm", arm_str])
                     writer.writerow(["flow_rate", proc_data['flow_rate_var'].get()])
+                    if arm_str == 'Arm 2':
+                        writer.writerow(["flow_rate_2", proc_data['flow_rate_var_2'].get()])
                     writer.writerow(["total_duration", proc_data['duration_var'].get()])
                     writer.writerow(["start_from_center", proc_data['start_from_center_var'].get()])
                     
@@ -198,6 +200,12 @@ class RecipeManager:
                             gui_proc['flow_rate_var'].set('500')
                     except:
                         gui_proc['flow_rate_var'].set('500')
+
+                # 處理 Arm 2 的第二個噴嘴 (Nozzle 3)
+                if 'flow_rate_2' in proc_data:
+                    gui_proc['flow_rate_var_2'].set(proc_data['flow_rate_2'])
+                else:
+                    gui_proc['flow_rate_var_2'].set('1500') # 預設值
 
                 gui_proc['duration_var'].set(proc_data.get('total_duration', '10'))
                 gui_proc['start_from_center_var'].set(proc_data.get('start_from_center', 'False').lower() == 'true')
