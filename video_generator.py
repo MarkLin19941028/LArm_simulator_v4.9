@@ -40,10 +40,10 @@ class VideoGenerator:
         ax.set_aspect('equal', 'box')
         ax.set_facecolor('black')
         ax.set_xlim(-350, 350)
-        ax.set_ylim(-300, 225)
+        ax.set_ylim(-240, 225)
 
         # 背景元件
-        ax.add_patch(plt.Rectangle((-350, -300), 700, 525, facecolor='none', edgecolor='gray', lw=2))
+        ax.add_patch(plt.Rectangle((-350, -240), 700, 465, facecolor='none', edgecolor='gray', lw=2))
         ax.add_patch(plt.Circle((0, 0), WAFER_RADIUS, facecolor='#222222', edgecolor='cyan', lw=1.5, zorder=1))
         # 晶圓中心點
         ax.add_patch(plt.Circle((0, 0), 3, color='cyan', zorder=2))

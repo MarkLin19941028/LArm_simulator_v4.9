@@ -90,24 +90,24 @@ STATE_MOVING_FROM_CENTER_TO_START = "MOVING_FROM_CENTER_TO_START"
 
 ARM_GEOMETRIES = {
     1: {
-        "pivot": np.array([-278.0, -250.5]), 
-        "length": 374.21,
-        "home": np.array([-247.583, 122.472]),
-        "p_start": np.array([-121.323, 89.331]), 
-        "p_end": np.array([75.68, -128.255])
+        "pivot": np.array([-278.0, -160.0]), 
+        "length": 320.755,
+        "home": np.array([-251.160, 159.630]),
+        "p_start": np.array([-103.148, 108.906]), 
+        "p_end": np.array([42.351, -143.897])
     },
     2: {
-        "pivot": np.array([278.0, -250.5]), 
-        "length": 374.21,
-        "home": np.array([247.583, 122.472]),
-        "p_start": np.array([121.323, 89.331]), 
-        "p_end": np.array([-75.68, -128.255])
+        "pivot": np.array([278.0, -160.0]), 
+        "length": 320.755,
+        "home": np.array([251.718, 159.676]),
+        "p_start": np.array([103.148, 108.906]), 
+        "p_end": np.array([-42.351, -143.897])
     },
     3: {
-        "pivot": np.array([278.0, -270.5]), 
-        "length": 387.9,
-        "home": np.array([-108.71, -240.20]),
-        "p_start": np.array([-81.866, -125.714]), 
-        "p_end": np.array([123.428, 85.272])
+        "pivot": np.array([278.0, -210.0]), 
+        "length": 348.402,
+        "home": np.array([-69.328, -182.665]),
+        "p_start": np.array([-62.528, -136.346]), 
+        "p_end": np.array([114.058, 97.420])
     }
 }

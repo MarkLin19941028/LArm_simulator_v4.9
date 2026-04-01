@@ -1352,8 +1352,8 @@ class SimulationApp:
     def init_plot(self):
         self.ax.clear(); self.ax.set_aspect('equal', 'box'); self.ax.set_facecolor('black')
         # 修改顯示範圍為寬 700，高 450 (-350~350, -225~225)
-        self.ax.set_xlim(-350, 350); self.ax.set_ylim(-300, 225)
-        self.ax.add_patch(plt.Rectangle((-350, -300), 700, 525, facecolor='none', edgecolor='gray', lw=2))
+        self.ax.set_xlim(-350, 350); self.ax.set_ylim(-240, 225)
+        self.ax.add_patch(plt.Rectangle((-350, -240), 700, 465, facecolor='none', edgecolor='gray', lw=2))
         self.ax.add_patch(plt.Circle((0, 0), WAFER_RADIUS, facecolor='#222222', edgecolor='cyan', lw=1.5, zorder=1))
         self.ax.add_patch(plt.Circle((0, 0), 3, color='cyan', zorder=2))
         self.notch_patch = plt.Polygon([[0, 0], [0, 0], [0, 0]], closed=True, facecolor='black', edgecolor='cyan', lw=1.5, zorder=2)
