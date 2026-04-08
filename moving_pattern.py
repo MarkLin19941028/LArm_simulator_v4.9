@@ -65,7 +65,8 @@ class MovingPatternGenerator:
                 current_multiplier = 1.0
 
             self._run_headless_pattern_generation(parsed_recipe, filepath_img, filepath_vid, filepath_heatmap, filepath_csv, filepath_radial, progress_widgets, play_speed_multiplier=current_multiplier)
-            messagebox.showinfo("Success", f"Moving Pattern, Heatmap, Radial Graph and CSV exported successfully to:\n{filepath_img}\n{filepath_vid}\n{filepath_heatmap}\n{filepath_radial}\n{filepath_csv}")
+            # messagebox.showinfo("Success", f"Moving Pattern, Heatmap, Radial Graph and CSV exported successfully to:\n{filepath_img}\n{filepath_vid}\n{filepath_heatmap}\n{filepath_radial}\n{filepath_csv}")
+            print(f"Moving Pattern, Heatmap, Radial Graph and CSV exported successfully to:\n{filepath_img}\n{filepath_vid}\n{filepath_heatmap}\n{filepath_radial}\n{filepath_csv}")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to generate pattern and video: {e}")
         finally:

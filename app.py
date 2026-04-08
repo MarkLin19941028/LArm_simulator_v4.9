@@ -210,7 +210,8 @@ class SimulationApp:
                 # Provide a generic fallback message for any other parameters
                 message = range_info
 
-            messagebox.showwarning(title, message)
+            # messagebox.showwarning(title, message)
+            print(f"Warning [{title}]: {message}")
             string_var.set(str(min_val))  # Reset the invalid value to the minimum value
             # --- MODIFICATION END ---
 
@@ -290,7 +291,8 @@ class SimulationApp:
             if not (min_val <= val <= max_val):
                 raise ValueError
         except ValueError:
-            messagebox.showwarning("Invalid Input", f"Value for '{name}' must be between {min_val} and {max_val}.")
+            # messagebox.showwarning("Invalid Input", f"Value for '{name}' must be between {min_val} and {max_val}.")
+            print(f"Warning [Invalid Input]: Value for '{name}' must be between {min_val} and {max_val}.")
             var.set(str(min_val)) # 重置為最小值
 
     def get_current_config(self):
@@ -644,7 +646,8 @@ class SimulationApp:
                 play_speed_multiplier=current_multiplier,
                 config=current_config
             )
-            messagebox.showinfo("Success", f"Video exported successfully to:\n{filepath}")
+            # messagebox.showinfo("Success", f"Video exported successfully to:\n{filepath}")
+            print(f"Video exported successfully to:\n{filepath}")
         except Exception as e:
             messagebox.showerror("Error", f"An error occurred during video generation: {e}")
         finally:
@@ -713,6 +716,7 @@ class SimulationApp:
                         writer.writeheader()
                         writer.writerows(report_data)
                     # messagebox.showinfo("Success", f"Simulation report exported successfully to:\n{filepath}")
+                    print(f"Simulation report exported successfully to:\n{filepath}")
                 except Exception as e:
                     messagebox.showerror("Export Error", f"Failed to write simulation report to file: {e}")
                     
@@ -737,7 +741,8 @@ class SimulationApp:
                             writer = csv.DictWriter(csvfile, fieldnames=headers)
                             writer.writeheader()
                             writer.writerows(processed_particle_data)
-                    messagebox.showinfo("Success", f"Report exported successfully to:\n{particle_filepath}")
+                    # messagebox.showinfo("Success", f"Report exported successfully to:\n{particle_filepath}")
+                    print(f"Report exported successfully to:\n{particle_filepath}")
                 except Exception as e:
                     messagebox.showerror("Export Error", f"Failed to write particle report to file: {e}")
 
@@ -816,7 +821,8 @@ class SimulationApp:
                 progress_window.destroy()
 
             if success:
-                messagebox.showinfo("Success", f"Etching Amount exported successfully.")
+                # messagebox.showinfo("Success", f"Etching Amount exported successfully.")
+                print(f"Etching Amount exported successfully.")
 
         except Exception as e:
             messagebox.showerror("Etching Error", f"Failed during etching amount generation: {e}")
@@ -883,7 +889,8 @@ class SimulationApp:
                 progress_window.destroy()
 
             if success:
-                messagebox.showinfo("Success", f"Cleaning Dose exported successfully.")
+                # messagebox.showinfo("Success", f"Cleaning Dose exported successfully.")
+                print(f"Cleaning Dose exported successfully.")
 
         except Exception as e:
             messagebox.showerror("Dose Error", f"Failed during cleaning dose generation: {e}")
@@ -982,11 +989,12 @@ class SimulationApp:
 
             if success:
                 # 提示成功，列出產生的檔案類型
-                messagebox.showinfo("Success", 
-                    f"Accumulation Heatmap exported successfully:\n\n"
-                    f"1. Heatmap PNG (Quantitative)\n"
-                    f"2. Radial Distribution Plot\n"
-                    f"3. Raw Data CSV (Residence Time)")
+                # messagebox.showinfo("Success", 
+                #     f"Accumulation Heatmap exported successfully:\n\n"
+                #     f"1. Heatmap PNG (Quantitative)\n"
+                #     f"2. Radial Distribution Plot\n"
+                #     f"3. Raw Data CSV (Residence Time)")
+                print(f"Accumulation Heatmap exported successfully:\n1. Heatmap PNG\n2. Radial Plot\n3. Raw CSV")
 
         except ImportError as e:
             # 針對 Numba 未安裝的錯誤處理
@@ -1073,7 +1081,8 @@ class SimulationApp:
                 progress_window.destroy()
 
             if success:
-                messagebox.showinfo("Success", f"Charging Simulation exported successfully.")
+                # messagebox.showinfo("Success", f"Charging Simulation exported successfully.")
+                print(f"Charging Simulation exported successfully.")
 
         except Exception as e:
             messagebox.showerror("Charging Error", f"Failed during charging simulation generation: {e}")

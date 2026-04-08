@@ -94,6 +94,7 @@ class RecipeManager:
                     writer.writerow([key, val])
             
             # messagebox.showinfo("Success", "Recipe exported successfully!")
+            print("Recipe exported successfully!")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to export recipe: {e}")
 
@@ -297,6 +298,7 @@ class RecipeManager:
                 self.app.current_recipe_file_var.set(f"Current Recipe: {filename}")
 
             # messagebox.showinfo("Success", "Recipe imported successfully!")
+            print("Recipe imported successfully!")
             
         except Exception as e:
             messagebox.showerror("Error", f"Failed to import recipe: {e}")

@@ -522,22 +522,26 @@ class AutoTunerGUI:
         if not self.is_tuning[tab_name]:
             # Start Tuning
             if not self.fetch_latest_data():
-                messagebox.showwarning("Warning", "Failed to fetch recipe.")
+                # messagebox.showwarning("Warning", "Failed to fetch recipe.")
+                print("Warning: Failed to fetch recipe.")
                 return
 
             if tab_name != "PRE" and self.tabs_state[tab_name]["exp_radius"] is None:
-                messagebox.showwarning("Warning", f"Please load experimental CSV for {tab_name} first!")
+                # messagebox.showwarning("Warning", f"Please load experimental CSV for {tab_name} first!")
+                print(f"Warning: Please load experimental CSV for {tab_name} first!")
                 return
                 
             active = {k: v for k, v in self.tabs_state[tab_name]["param_vars"].items() if v['enabled'].get()}
             if not active:
-                messagebox.showwarning("Warning", "Please select at least one parameter to tune.")
+                # messagebox.showwarning("Warning", "Please select at least one parameter to tune.")
+                print("Warning: Please select at least one parameter to tune.")
                 return
             
             try:
                 trials = int(self.tabs_state[tab_name]["ent_trials"].get())
             except ValueError:
-                messagebox.showwarning("Warning", "Please enter a valid integer for trials.")
+                # messagebox.showwarning("Warning", "Please enter a valid integer for trials.")
+                print("Warning: Please enter a valid integer for trials.")
                 return
                 
             self.is_tuning[tab_name] = True
