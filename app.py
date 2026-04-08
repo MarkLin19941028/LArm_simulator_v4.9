@@ -134,6 +134,9 @@ class SimulationApp:
         self.play_speed_multiplier = 1.0
         self.simulation_time_elapsed = 0.0
         self.display_water_var = tk.BooleanVar(value=True)
+        self.autotuner_instance = None
+        self.imported_tuning_params = {} # 存放從 Recipe 匯入的調校參數 (Initial Guess)
+
         # --- 動態渲染緩存 ---
         self.water_fade_history = {} # 用於實現尾跡效果 (可選)
         
@@ -250,7 +253,8 @@ class SimulationApp:
             # 使用 Grid 佈局，每行放兩個參數，下方加上說明文字
             inner_items = list(params.items())
             for i, (key, info) in enumerate(inner_items):
-                label_text, default_val, var_type, limit_range, description = info
+                # 同步 TREOS 結構：解包 6 個值
+                label_text, default_val, var_type, limit_range, description, is_tunable = info
                 
                 # 計算位置：i=0,1 -> r=0; i=2,3 -> r=2 ... (每組佔用兩行，一行控制項，一行說明)
                 base_r = (i // 2) * 2
@@ -347,16 +351,13 @@ class SimulationApp:
         report_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), padx=5, pady=5)
         
         # 第一列：基礎報告與工具
-        ttk.Button(report_frame, text="Simulation Report", width=20, command=self.export_simulation_report).grid(row=0, column=0, padx=5, pady=2, sticky="w")
-        ttk.Button(report_frame, text="Generate Video", width=20, command=self.export_simulation_video).grid(row=0, column=1, padx=5, pady=2, sticky="w")
-        ttk.Button(report_frame, text="Moving Pattern", width=20, command=self.moving_pattern_generator.export_nozzle_pattern).grid(row=0, column=2, padx=5, pady=2, sticky="w")
-        ttk.Button(report_frame, text="Accumulation Heatmap", width=20, command=self.export_accumulation_heatmap).grid(row=0, column=3, padx=5, pady=2, sticky="w")
-        
+        ttk.Button(report_frame, text="Simulation Report", width=18, command=self.export_simulation_report).grid(row=0, column=0, padx=5, pady=2, sticky="w")
+        ttk.Button(report_frame, text="Generate Video", width=18, command=self.export_simulation_video).grid(row=0, column=1, padx=5, pady=2, sticky="w")
+        ttk.Button(report_frame, text="Moving Pattern", width=18, command=self.moving_pattern_generator.export_nozzle_pattern).grid(row=0, column=2, padx=5, pady=2, sticky="w")
+
         # 第二列：進階分析與調校工具
-        ttk.Button(report_frame, text="Etching Amount", width=20, command=self.export_etching_amount).grid(row=1, column=0, padx=5, pady=2, sticky="w")
-        ttk.Button(report_frame, text="Particle Removal", width=20, command=self.export_pre_efficiency).grid(row=1, column=1, padx=5, pady=2, sticky="w")
-        ttk.Button(report_frame, text="Charging", width=20, command=self.export_charging_simulation).grid(row=1, column=2, padx=5, pady=2, sticky="w")
-        ttk.Button(report_frame, text="AutoTune", width=20, command=self.open_autotuner).grid(row=1, column=3, padx=5, pady=2, sticky="w")
+        ttk.Button(report_frame, text="Accumulation Heatmap", width=18, command=self.export_accumulation_heatmap).grid(row=1, column=0, padx=5, pady=2, sticky="w")
+        ttk.Button(report_frame, text="Advanced Function", width=18, command=self.open_autotuner).grid(row=1, column=1, padx=5, pady=2, sticky="w")
 
         global_frame = ttk.LabelFrame(content_frame, text="Global Parameters", padding="10")
         global_frame.grid(row=2, column=0, sticky=(tk.W, tk.E), padx=5, pady=5)
@@ -441,7 +442,16 @@ class SimulationApp:
         for child in proc_data['steps_container'].winfo_children():
             child.config(state=new_state)
 
-        proc_data['flow_label_var'].set(f"{arm_str} Flow:" if arm_str != 'None' else "Flow:")
+        # 同步 TREOS 標籤樣式
+        if arm_str == 'Arm 1':
+            label = "Nozzle 1 Flow:"
+        elif arm_str == 'Arm 2':
+            label = "Nozzle 2 Flow:"
+        elif arm_str == 'Arm 3':
+            label = "Nozzle 3 Flow:"
+        else:
+            label = "Flow:"
+        proc_data['flow_label_var'].set(label)
 
     def recreate_process_widgets(self, *args, imported_data=None):
         for widget in self.processes_container.winfo_children(): widget.destroy()
@@ -458,7 +468,7 @@ class SimulationApp:
             arm_menu.grid(row=0, column=1, sticky=tk.W)
             
             # Flow Rate for this process
-            flow_label_var = tk.StringVar(value="Arm 1 Flow:")
+            flow_label_var = tk.StringVar(value="Nozzle 1 Flow:")
             flow_label = ttk.Label(proc_params_frame, textvariable=flow_label_var)
             flow_label.grid(row=0, column=2, sticky=tk.W, padx=(10, 5))
             flow_rate_var = tk.StringVar(value='1500')
@@ -738,7 +748,7 @@ class SimulationApp:
         finally:
             self._report_export_lock = False
 
-    def export_etching_amount(self):
+    def export_etching_amount(self, custom_config=None):
         if getattr(self, '_etching_export_lock', False):
             return
         self._etching_export_lock = True
@@ -793,7 +803,7 @@ class SimulationApp:
             except (AttributeError, ValueError):
                 current_multiplier = 1.0
 
-            current_config = self.get_current_config()
+            current_config = custom_config if custom_config else self.get_current_config()
             generator = EtchingAmountGenerator(self)
             success = generator.generate(
                 parsed_recipe, filepath, 
@@ -815,7 +825,7 @@ class SimulationApp:
         finally:
             self._etching_export_lock = False
 
-    def export_pre_efficiency(self):
+    def export_pre_efficiency(self, custom_config=None):
         if getattr(self, '_pre_export_lock', False):
             return
         self._pre_export_lock = True
@@ -865,7 +875,7 @@ class SimulationApp:
             progress_bar.pack(pady=10)
             progress_widgets = {'window': progress_window, 'bar': progress_bar, 'label': progress_label}
 
-            current_config = self.get_current_config()
+            current_config = custom_config if custom_config else self.get_current_config()
             generator = PREGenerator(self)
             success = generator.generate(parsed_recipe, filepath, config=current_config, progress_widgets=progress_widgets)
 
@@ -995,7 +1005,7 @@ class SimulationApp:
         finally:
             self._heatmap_export_lock = False
 
-    def export_charging_simulation(self):
+    def export_charging_simulation(self, custom_config=None):
         if getattr(self, '_charging_export_lock', False):
             return
         self._charging_export_lock = True
@@ -1045,7 +1055,7 @@ class SimulationApp:
             progress_bar.pack(pady=10)
             progress_widgets = {'window': progress_window, 'bar': progress_bar, 'label': progress_label}
 
-            current_config = self.get_current_config()
+            current_config = custom_config if custom_config else self.get_current_config()
             generator = ChargingGenerator(self)
             try:
                 current_multiplier = float(self.speed_var.get().replace('x', ''))
@@ -1352,8 +1362,8 @@ class SimulationApp:
     def init_plot(self):
         self.ax.clear(); self.ax.set_aspect('equal', 'box'); self.ax.set_facecolor('black')
         # 修改顯示範圍為寬 700，高 450 (-350~350, -225~225)
-        self.ax.set_xlim(-350, 350); self.ax.set_ylim(-240, 225)
-        self.ax.add_patch(plt.Rectangle((-350, -240), 700, 465, facecolor='none', edgecolor='gray', lw=2))
+        self.ax.set_xlim(-350, 350); self.ax.set_ylim(-280, 225)
+        self.ax.add_patch(plt.Rectangle((-350, -280), 700, 505, facecolor='none', edgecolor='gray', lw=2))
         self.ax.add_patch(plt.Circle((0, 0), WAFER_RADIUS, facecolor='#222222', edgecolor='cyan', lw=1.5, zorder=1))
         self.ax.add_patch(plt.Circle((0, 0), 3, color='cyan', zorder=2))
         self.notch_patch = plt.Polygon([[0, 0], [0, 0], [0, 0]], closed=True, facecolor='black', edgecolor='cyan', lw=1.5, zorder=2)
@@ -1435,8 +1445,11 @@ class SimulationApp:
         return artists
 
     def open_autotuner(self):
+        if self.autotuner_instance and self.autotuner_instance.root.winfo_exists():
+            self.autotuner_instance.root.lift()
+            return
         tuner_window = tk.Toplevel(self.root)
-        AutoTunerGUI(tuner_window, main_app=self)
+        self.autotuner_instance = AutoTunerGUI(tuner_window, main_app=self)
 
     def on_closing(self):
         try:

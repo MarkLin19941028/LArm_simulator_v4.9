@@ -78,7 +78,7 @@ class MovingPatternGenerator:
         ax = fig.add_subplot(111)
         ax.set_aspect('equal', 'box')
         ax.set_xlim(-350, 350)
-        ax.set_ylim(-240, 225)
+        ax.set_ylim(-280, 225)
         ax.set_facecolor('#111111')
         ax.add_patch(plt.Circle((0, 0), WAFER_RADIUS, facecolor='#333333', edgecolor='cyan', lw=1.5, zorder=1))
 

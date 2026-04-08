@@ -26,7 +26,7 @@ class RecipeManager:
 
             import csv
 
-            with open(filepath, 'w', encoding='utf-8', newline='') as f:
+            with open(filepath, 'w', encoding='utf-8-sig', newline='') as f:
                 writer = csv.writer(f)
                 
                 writer.writerow(["[GLOBAL]"])
@@ -69,10 +69,46 @@ class RecipeManager:
                             writer.writerow([f"step_{j+1}_pos", step_entry['pos'].get()])
                             writer.writerow([f"step_{j+1}_speed", step_entry['speed'].get()])
                     writer.writerow([])
+
+                # --- 匯出 Advanced Function (AutoTuner) 的 Initial Guess 參數 ---
+                writer.writerow(["[TUNING_PARAMETERS]"])
+                tuning_params = {}
+                # 優先從開啟的視窗中獲取最新值
+                if self.app.autotuner_instance and self.app.autotuner_instance.root.winfo_exists():
+                    tuning_params = self.app.autotuner_instance.get_all_tuning_guesses()
+                    # 同時更新 app 的暫存
+                    self.app.imported_tuning_params.update(tuning_params)
+                else:
+                    # 視窗未開啟，使用 app 暫存的參數 (可能是之前匯入的)
+                    tuning_params = self.app.imported_tuning_params
+
+                # 如果 tuning_params 為空，則從預設配置中獲取 (確保匯出時總是有數值)
+                if not tuning_params:
+                    from simulation_config_def import PARAMETER_DEFINITIONS
+                    for category, params in PARAMETER_DEFINITIONS.items():
+                        if category in ["Etching Amount", "Particle Removal", "Charging Simulation"]:
+                            for key, info in params.items():
+                                tuning_params[key] = info[1] # info[1] 是預設值
+
+                for key, val in tuning_params.items():
+                    writer.writerow([key, val])
             
-            messagebox.showinfo("Success", "Recipe exported successfully!")
+            # messagebox.showinfo("Success", "Recipe exported successfully!")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to export recipe: {e}")
+
+    def _read_file_with_fallback(self, filepath):
+        """
+        嘗試以不同的編碼方式讀取檔案，解決 Excel 匯出造成的編碼問題
+        """
+        encodings = ['utf-8-sig', 'utf-8', 'cp1252', 'big5']
+        for enc in encodings:
+            try:
+                with open(filepath, 'r', encoding=enc) as f:
+                    return f.read(), enc
+            except UnicodeDecodeError:
+                continue
+        raise UnicodeDecodeError(f"Failed to decode file {filepath} with any of {encodings}")
 
     def import_recipe(self):
         """
@@ -88,24 +124,35 @@ class RecipeManager:
 
             global_params, imported_processes, current_process_dict = {}, [], None
             
+            imported_tuning_params = {}
             if filepath.endswith(".csv"):
                 import csv
-                with open(filepath, 'r', encoding='utf-8') as f:
-                    reader = csv.reader(f)
-                    for row in reader:
-                        if not row: continue
-                        if len(row) == 1 and row[0].startswith('[') and row[0].endswith(']'):
-                            section = row[0][1:-1]
-                            if section.startswith('PROCESS_'):
-                                current_process_dict = {'steps_data': {}}
-                                imported_processes.append(current_process_dict)
-                            else:
-                                current_process_dict = None
-                            continue
-                        
-                        if len(row) >= 2:
+                content, enc = self._read_file_with_fallback(filepath)
+                
+                import io
+                f = io.StringIO(content)
+                reader = csv.reader(f)
+                current_section = None
+                for raw_row in reader:
+                    if not raw_row: continue
+                    # 過濾掉空白欄位 (Excel 可能會塞入很多空白)
+                    row = [col for col in raw_row if col.strip() != ""]
+                    if not row: continue
+                    
+                    if row[0].startswith('[') and row[0].endswith(']'):
+                        current_section = row[0][1:-1]
+                        if current_section.startswith('PROCESS_'):
+                            current_process_dict = {'steps_data': {}}
+                            imported_processes.append(current_process_dict)
+                        else:
+                            current_process_dict = None
+                        continue
+                    
+                    if len(row) >= 2:
                             key, value = row[0].strip(), row[1].strip()
-                            if current_process_dict is None:
+                            if current_section == "TUNING_PARAMETERS":
+                                imported_tuning_params[key] = value
+                            elif current_process_dict is None:
                                 global_params[key] = value
                                 if key.startswith('flow_rate_arm_'):
                                     arm_id = int(key.split('_')[-1])
@@ -121,14 +168,14 @@ class RecipeManager:
                                 else:
                                     current_process_dict[key] = value
             else:
-                with open(filepath, 'r', encoding='utf-8') as f:
-                    lines = f.readlines()
+                content, enc = self._read_file_with_fallback(filepath)
+                lines = content.splitlines()
                 for line in lines:
                     line = line.strip()
                     if not line or line.startswith('#'): continue
                     if line.startswith('[') and line.endswith(']'):
-                        section = line[1:-1]
-                        if section.startswith('PROCESS_'):
+                        current_section = line[1:-1]
+                        if current_section.startswith('PROCESS_'):
                             current_process_dict = {'steps_data': {}}
                             imported_processes.append(current_process_dict)
                         else:
@@ -138,7 +185,9 @@ class RecipeManager:
                     if '=' not in line: continue
                     key, value = [x.strip() for x in line.split('=', 1)]
                     
-                    if current_process_dict is None:
+                    if current_section == "TUNING_PARAMETERS":
+                        imported_tuning_params[key] = value
+                    elif current_process_dict is None:
                         global_params[key] = value
                         if key.startswith('flow_rate_arm_'):
                             arm_id = int(key.split('_')[-1])
@@ -234,13 +283,20 @@ class RecipeManager:
                 
             self.app._on_water_setting_mode_change() # 更新 Water Settings UI 顯示
 
+            # --- 更新 Advanced Function (AutoTuner) 參數 ---
+            if imported_tuning_params:
+                self.app.imported_tuning_params.update(imported_tuning_params)
+                # 若 AutoTuner 視窗已開啟，則立即更新 UI
+                if self.app.autotuner_instance and self.app.autotuner_instance.root.winfo_exists():
+                    self.app.autotuner_instance.set_tuning_guesses(imported_tuning_params)
+
             # 更新 UI 顯示的檔案名稱
             import os
             filename = os.path.basename(filepath)
             if hasattr(self.app, 'current_recipe_file_var'):
                 self.app.current_recipe_file_var.set(f"Current Recipe: {filename}")
 
-            messagebox.showinfo("Success", "Recipe imported successfully!")
+            # messagebox.showinfo("Success", "Recipe imported successfully!")
             
         except Exception as e:
             messagebox.showerror("Error", f"Failed to import recipe: {e}")

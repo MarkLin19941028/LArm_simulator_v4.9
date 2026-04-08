@@ -19,24 +19,40 @@ from constants import (
 @njit(fastmath=True, cache=True)
 def _numba_deposit_and_separate_charge(surface_charge, liquid_charge, film_matrix, 
                                        pos_x, pos_y, vel_x, vel_y, 
-                                       radius, grid_size, dt, 
+                                       spray_r, grid_size, dt, 
                                        dynamic_eff):
     center_offset = 150.0
     idx_x, idx_y = pos_x + center_offset, pos_y + center_offset
-    r_pixel = int(math.ceil(radius))
+    r_pixel = int(math.ceil(spray_r))
     
     # 邊界限制
     min_i, max_i = int(max(0, idx_x - r_pixel)), int(min(grid_size - 1, idx_x + r_pixel))
     min_j, max_j = int(max(0, idx_y - r_pixel)), int(min(grid_size - 1, idx_y + r_pixel))
     
     speed = math.sqrt(vel_x**2 + vel_y**2)
-    q_gen = dynamic_eff * speed * dt
+    q_total = dynamic_eff * speed * dt
 
-    radius_sq = radius**2
+    radius_sq = spray_r**2
+    sigma = spray_r / 2.0
+    total_weight = 0.0
+
+    # Step 1: 計算範圍內高斯總權重 (歸一化基準)
     for i in range(min_i, max_i + 1):
         for j in range(min_j, max_j + 1):
-            if (float(i) - idx_x)**2 + (float(j) - idx_y)**2 <= radius_sq:
+            dist_sq = (float(i) - idx_x)**2 + (float(j) - idx_y)**2
+            if dist_sq <= radius_sq:
+                total_weight += math.exp(-dist_sq / (2 * sigma * sigma))
+
+    if total_weight <= 0.0: return
+
+    # Step 2: 歸一化分配電荷
+    for i in range(min_i, max_i + 1):
+        for j in range(min_j, max_j + 1):
+            dist_sq = (float(i) - idx_x)**2 + (float(j) - idx_y)**2
+            if dist_sq <= radius_sq:
                 if film_matrix[i, j] > 1e-5:
+                    weight = math.exp(-dist_sq / (2 * sigma * sigma)) / total_weight
+                    q_gen = q_total * weight
                     # [關鍵邏輯]：表面獲得電荷 (Fixed)，液體獲得反向電荷 (Mobile)
                     surface_charge[i, j] += q_gen  
                     liquid_charge[i, j] -= q_gen
@@ -45,9 +61,9 @@ def _numba_deposit_and_separate_charge(surface_charge, liquid_charge, film_matri
 # Numba Kernel 2: 表面擴散 (Surface Diffusion)
 # ==========================================
 @njit(fastmath=True, parallel=True, cache=True)
-def _numba_diffuse_surface(surf_in, surf_out, diff_coeff, dt, grid_size):
-    # alpha = D * dt / (dx^2)，此處假設 dx=1
-    alpha = min(0.25, diff_coeff * dt) 
+def _numba_diffuse_surface_advanced(surf_in, surf_out, diff_coeff, dt, grid_size, alpha_limit):
+    # 使用從 config 傳入的 alpha_limit (預設 0.25)
+    alpha = min(alpha_limit, diff_coeff * dt) 
     
     for i in prange(1, grid_size - 1):
         for j in range(1, grid_size - 1):
@@ -61,66 +77,44 @@ def _numba_diffuse_surface(surf_in, surf_out, diff_coeff, dt, grid_size):
 # Numba Kernel 3: 電荷演化 (Relaxation & Transport)
 # ==========================================
 @njit(fastmath=True, parallel=True, cache=True)
-def _numba_evolve_charge(charge_matrix, film_matrix, dt, 
-                         conductivity, relative_permittivity, 
-                         wafer_radius, spin_decay_rate):
-    """
-    物理機制: 介電鬆弛 (Dielectric Relaxation) 與 物理傳輸
-    邏輯:
-    1. 電荷會穿過液膜流向晶圓基板 (接地)。
-    2. 電荷會隨著液體被甩出晶圓邊緣。
-    """
-    rows, cols = charge_matrix.shape
+def _numba_evolve_charge_advanced(surface_charge, liquid_charge, film_matrix, dt, 
+                                  conductivity, relative_permittivity, 
+                                  wafer_radius, spin_decay_rate):
+    rows, cols = surface_charge.shape
     epsilon = relative_permittivity * VACUUM_PERMITTIVITY
     
-    # [關鍵物理計算 2]: 介電鬆弛時間 (Relaxation Time)
-    # tau = epsilon / sigma
-    # 導電率(sigma)越低，tau 越大，電荷消散越慢 (累積越多)
-    sigma = max(conductivity, 1e-12) # 避免除以零
+    # 計算介電鬆弛時間 (Relaxation Time)
+    sigma = max(conductivity, 1e-16)
     tau = epsilon / sigma
-    
-    # 衰減因子 (Exponential Decay)
     relax_factor = math.exp(-dt / tau)
     
     center_offset = 150.0
 
     for i in prange(rows):
         for j in range(cols):
-            q = charge_matrix[i, j]
             h = film_matrix[i, j]
             
-            if q != 0:
-                # 1. 介電鬆弛 (電荷流向 Substrate)
-                # 只有當有液膜連接到地面時才會發生 (簡化模型)
-                if h > 1e-6:
-                    q *= relax_factor
+            # --- [關鍵新增] 表面固定電荷的中和機制 ---
+            # 物理意義：液膜存在時提供洩漏路徑
+            if h > 1e-6 and surface_charge[i, j] != 0:
+                surface_charge[i, j] *= relax_factor
                 
-                # 2. 物理甩乾 (Spin-off)
-                # 電荷附著在液體上，液體被甩走，電荷也跟著走
-                dx = i - center_offset
-                dy = j - center_offset
+            # --- 液體流動電荷的演化 (原邏輯) ---
+            q_l = liquid_charge[i, j]
+            if q_l != 0:
+                q_l *= relax_factor # 液體內部的中和
+                
+                dx, dy = i - center_offset, j - center_offset
                 r = math.sqrt(dx*dx + dy*dy)
-                
-                # 簡單模擬液膜變薄帶走電荷
                 if r <= wafer_radius:
-                    # 邊緣甩得快
                     local_decay = spin_decay_rate * (1.0 + r/wafer_radius)
-                    q *= (1.0 - local_decay * dt)
+                    q_l *= (1.0 - local_decay * dt)
+                    film_matrix[i, j] *= (1.0 - local_decay * dt) # 膜厚隨甩乾減少
                 else:
-                    q = 0.0 # 離開晶圓
+                    q_l = 0.0
+                    film_matrix[i, j] = 0.0
                 
-                charge_matrix[i, j] = q
-            
-            # 同步更新簡易膜厚 (為了計算電位用)
-            if h > 0:
-                dx = i - center_offset
-                dy = j - center_offset
-                r = math.sqrt(dx*dx + dy*dy)
-                if r <= wafer_radius:
-                     local_decay = spin_decay_rate * (1.0 + r/wafer_radius)
-                     film_matrix[i, j] *= (1.0 - local_decay * dt)
-                else:
-                     film_matrix[i, j] = 0.0
+                liquid_charge[i, j] = q_l
 
 class ChargingGenerator:
     def __init__(self, app_instance):
@@ -136,6 +130,8 @@ class ChargingGenerator:
         rpm_factor = config.get('CHARGING_RPM_FACTOR', 5.0)
         diff_coeff = config.get('SURFACE_DIFFUSION_COEFF', 0.1)
         base_spin_decay = config.get('CHARGING_BASE_SPIN_DECAY', 2.0)
+        spray_r = config.get('CHARGING_SPRAY_RADIUS', 2.0)
+        alpha_limit = config.get('DIFFUSION_STABILITY_LIMIT', 0.25)
         
         headless_arms = {}
         for i, geo in ARM_GEOMETRIES.items():
@@ -146,11 +142,22 @@ class ChargingGenerator:
         }
         wp_dict = {1: water_params, 2: water_params, 3: water_params}
         
-        # [優化] 啟用 fast_mode，並設定粒子縮放比例，確保生成率下限
+        # [優化] 平衡 FPS 與精細度：確保顆粒感消除，並與正式輸出保持物理一致
+        max_rpm = 0
+        for proc in recipe['processes']:
+            spin = proc.get('spin_params', {})
+            c_max = spin.get('rpm', 0) if spin.get('mode', 'Simple') == 'Simple' else max(spin.get('start_rpm', 0), spin.get('end_rpm', 0))
+            if float(c_max) > max_rpm: max_rpm = float(c_max)
+
+        report_fps = max(200, min(2000, int(max_rpm * 1.0)))
+        recipe['dynamic_report_fps'] = report_fps
+        dt = 1.0 / report_fps
+
+        # [優化] 啟用 fast_mode，並設定粒子縮放比例，確保生成率下限以消弭顆粒感
         max_flow = max([proc.get('flow_rate', 500.0) for proc in recipe['processes']])
         from constants import PARTICLE_SPAWN_MULTIPLIER
         original_rate = max_flow * 0.5 * PARTICLE_SPAWN_MULTIPLIER
-        target_rate = max(50.0, original_rate * 0.1)
+        target_rate = max(200.0, original_rate * 0.5)
         fast_particle_scale = min(1.0, target_rate / max(original_rate, 1.0))
 
         engine = SimulationEngine(recipe, headless_arms, wp_dict, headless=True, config=config, fast_mode=True, fast_particle_scale=fast_particle_scale)
@@ -161,16 +168,6 @@ class ChargingGenerator:
         liquid_charge = np.zeros((grid_size, grid_size), dtype=np.float64)
         film_matrix = np.zeros((grid_size, grid_size), dtype=np.float64)
 
-        # [優化] AutoTune 模式下，不需要過高的 FPS，降低 FPS 以加大 dt，加速模擬
-        max_rpm = 0
-        for proc in recipe['processes']:
-            spin = proc.get('spin_params', {})
-            c_max = spin.get('rpm', 0) if spin.get('mode', 'Simple') == 'Simple' else max(spin.get('start_rpm', 0), spin.get('end_rpm', 0))
-            if float(c_max) > max_rpm: max_rpm = float(c_max)
-        
-        report_fps = max(30, min(1000, int(max_rpm * 0.5)))
-        recipe['dynamic_report_fps'] = report_fps
-        dt = 1.0 / report_fps
         total_duration = sum(p['total_duration'] for p in recipe['processes'])
         sim_clock = 0.0
 
@@ -192,13 +189,8 @@ class ChargingGenerator:
                     actual_flow = current_proc.get('flow_rate', 500.0)
                     
                     flow_scale = actual_flow / 500.0
-                    
-                    self._simple_deposit_film(film_matrix, pos[0], pos[1], 2.0, 0.005 * flow_scale)
-                    
-                    vel = engine.particles_vel[idx]
-                    # [優化] 補償減少的粒子數，確保總沉積液膜量不變 (charge_generator 的 _simple_deposit_film 已經包含 flow_scale，但我們也要對 _simple_deposit_film 做縮放)
-                    # Ah, wait, _simple_deposit_film is called before this.
-                    # Let's scale flow_scale
+
+                    # 補償減少的粒子數，確保總沉積液膜量不變
                     flow_scale *= (1.0 / fast_particle_scale)
                     
                     self._simple_deposit_film(film_matrix, pos[0], pos[1], 2.0, 0.005 * flow_scale)
@@ -207,18 +199,18 @@ class ChargingGenerator:
                     _numba_deposit_and_separate_charge(
                         surface_charge, liquid_charge, film_matrix,
                         pos[0], pos[1], vel[0], vel[1],
-                        2.0, grid_size, dt,
+                        spray_r, grid_size, dt,
                         dynamic_eff * flow_scale
                     )
 
-            _numba_diffuse_surface(surface_charge, surface_buffer, diff_coeff, dt, 300)
+            _numba_diffuse_surface_advanced(surface_charge, surface_buffer, diff_coeff, dt, 300, alpha_limit)
             surface_charge[:] = surface_buffer[:]
 
             rpm = snapshot.get('rpm', 0)
             current_spin_decay = base_spin_decay * (1.0 + abs(rpm)/500.0)
             
-            _numba_evolve_charge(
-                liquid_charge, film_matrix, dt,
+            _numba_evolve_charge_advanced(
+                surface_charge, liquid_charge, film_matrix, dt,
                 cond, perm, WAFER_RADIUS, current_spin_decay
             )
 
@@ -247,6 +239,10 @@ class ChargingGenerator:
     def generate(self, recipe, filepath, config=None, progress_widgets=None, play_speed_multiplier=1.0):
         """
         執行電荷累積模擬 (解耦雙電層模型 Decoupled EDL Model)
+        產出結果：
+        1. 表面累積電位分布圖 (2D Heatmap)
+        2. 徑向表面電位分布圖 (1D Plot)
+        3. 電荷演化動態影片 (MP4)
         """
         # 1. 讀取設定
         if config is None:
@@ -260,6 +256,8 @@ class ChargingGenerator:
         rpm_factor = config.get('CHARGING_RPM_FACTOR', 5.0)    # RPM 增強因子
         diff_coeff = config.get('SURFACE_DIFFUSION_COEFF', 0.1) # 擴散係係數
         base_spin_decay = config.get('CHARGING_BASE_SPIN_DECAY', 2.0)
+        spray_r = config.get('CHARGING_SPRAY_RADIUS', 2.0)
+        alpha_limit = config.get('DIFFUSION_STABILITY_LIMIT', 0.25)
         
         # 2. 初始化模擬引擎
         # 為了獨立運作，我們需要自己的 SimulationEngine 來跑粒子軌跡
@@ -272,7 +270,25 @@ class ChargingGenerator:
         # 為了相容性，簡單包裝
         wp_dict = {1: water_params, 2: water_params, 3: water_params}
         
-        engine = SimulationEngine(recipe, headless_arms, wp_dict, headless=True, config=config)
+        # [對齊 AutoTuner 的加速邏輯] (優化精細度消弭顆粒感)
+        max_rpm = 0
+        for proc in recipe['processes']:
+            spin = proc.get('spin_params', {})
+            c_max = spin.get('rpm', 0) if spin.get('mode', 'Simple') == 'Simple' else max(spin.get('start_rpm', 0), spin.get('end_rpm', 0))
+            if float(c_max) > max_rpm: max_rpm = float(c_max)
+
+        report_fps = max(200, min(2000, int(max_rpm * 1.0)))
+        recipe['dynamic_report_fps'] = report_fps
+        dt = 1.0 / report_fps
+
+        # 啟用 fast_mode，並設定粒子縮放比例
+        max_flow = max([proc.get('flow_rate', 500.0) for proc in recipe['processes']])
+        from constants import PARTICLE_SPAWN_MULTIPLIER
+        original_rate = max_flow * 0.5 * PARTICLE_SPAWN_MULTIPLIER
+        target_rate = max(200.0, original_rate * 0.5)
+        fast_particle_scale = min(1.0, target_rate / max(original_rate, 1.0))
+
+        engine = SimulationEngine(recipe, headless_arms, wp_dict, headless=True, config=config, fast_mode=True, fast_particle_scale=fast_particle_scale)
         
         # 3. 初始化網格 (三層矩陣)
         grid_size = 300
@@ -287,8 +303,6 @@ class ChargingGenerator:
         next_record_time = 0.0
         video_buffer = []
 
-        report_fps = recipe.get('dynamic_report_fps', REPORT_FPS)
-        dt = 1.0 / report_fps
         total_duration = sum(p['total_duration'] for p in recipe['processes'])
         sim_clock = 0.0
 
@@ -363,6 +377,9 @@ class ChargingGenerator:
                     
                     # 流量基礎係數 (以 500mL/min 為基準)
                     flow_scale = actual_flow / 500.0
+
+                    # 補償減少的粒子數，確保總沉積液膜量不變
+                    flow_scale *= (1.0 / fast_particle_scale)
                     
                     # A. 沉積液膜
                     self._simple_deposit_film(self.film_matrix, pos[0], pos[1], 2.0, 0.005 * flow_scale)
@@ -372,20 +389,20 @@ class ChargingGenerator:
                     _numba_deposit_and_separate_charge(
                         self.surface_charge, self.liquid_charge, self.film_matrix,
                         pos[0], pos[1], vel[0], vel[1],
-                        2.0, grid_size, dt,
+                        spray_r, grid_size, dt,
                         dynamic_eff * flow_scale
                     )
 
             # --- C. 表面擴散 (平滑化) [改良點 3] ---
-            _numba_diffuse_surface(self.surface_charge, self.surface_buffer, diff_coeff, dt, 300)
+            _numba_diffuse_surface_advanced(self.surface_charge, self.surface_buffer, diff_coeff, dt, 300, alpha_limit)
             self.surface_charge[:] = self.surface_buffer[:] # 更新回原矩陣
 
             # --- D. 演化液體電荷 (Spin-off) [改良點 4] ---
             rpm = snapshot.get('rpm', 0)
             current_spin_decay = base_spin_decay * (1.0 + abs(rpm)/500.0)
             
-            _numba_evolve_charge(
-                self.liquid_charge, self.film_matrix, dt,
+            _numba_evolve_charge_advanced(
+                self.surface_charge, self.liquid_charge, self.film_matrix, dt,
                 cond, perm, WAFER_RADIUS, current_spin_decay
             )
 
@@ -413,9 +430,15 @@ class ChargingGenerator:
         real_base = filepath.replace("_Charging.png", "")
         radial_png_path = f"{real_base}_Charging_Radial_Distribution.png"
         video_path = f"{real_base}_Charging_Simulation.mp4"
+        csv_path = f"{real_base}_Charging_RawData.csv"
 
         # 計算電位矩陣 (基於表面電荷與等效電容)
         potential_map = self._calculate_potential(charge_Q, config)
+
+        # 0. 輸出 RawData CSV
+        try:
+            np.savetxt(csv_path, potential_map.T, delimiter=",", fmt='%.6f', header="Charging Potential Data (V)")
+        except: pass
 
         # 1. 輸出 Heatmap PNG
         self._export_potential_map(potential_map, filepath, config)
@@ -430,19 +453,28 @@ class ChargingGenerator:
         # KPFM 量測的是乾燥後的表面殘留電位
         # V = Q_surface / C_kpfm
         kpfm_cap = config.get('KPFM_CAPACITANCE', 1.0e-10) # 用於校準伏特數值的縮放因子
-        potential_map = surface_Q / kpfm_cap
-        return potential_map
+        return surface_Q / kpfm_cap
 
     def _export_potential_map(self, potential_map, filepath, current_config):
-        v_max = np.max(potential_map)
-        v_min = np.min(potential_map)
+        data = potential_map.T
+        v_max = np.max(data)
+        v_min = np.min(data)
         abs_max = max(abs(v_max), abs(v_min))
         if abs_max == 0: abs_max = 1.0
+
+        # 統計數值 (只算絕對值 > 1e-4 的區域，避免背景干擾)
+        valid_mask = np.abs(data) > 1e-4
+        if np.any(valid_mask):
+            v_avg = np.mean(data[valid_mask])
+            v_med = np.median(data[valid_mask])
+            v_min_valid = np.min(data[valid_mask])
+        else:
+            v_avg = v_med = v_min_valid = 0.0
         
         plt.figure(figsize=(10, 8))
-        im = plt.imshow(potential_map.T, 
+        im = plt.imshow(data, 
                         origin='lower', 
-                        cmap='seismic_r', 
+                        cmap='jet', 
                         extent=[-150, 150, -150, 150],
                         vmin=-abs_max, vmax=abs_max)
         
@@ -452,21 +484,28 @@ class ChargingGenerator:
         plt.xlabel('X (mm)')
         plt.ylabel('Y (mm)')
 
-        # 參數資訊
-        params_lines = []
+        # 僅顯示 Charging 相關 Tuning Parameters
+        tuning_keys = [
+            'FLUID_CONDUCTIVITY', 'FLUID_RELATIVE_PERMITTIVITY',
+            'CHARGING_EFFICIENCY', 'CHARGING_RPM_FACTOR',
+            'SURFACE_DIFFUSION_COEFF', 'CHARGING_SPRAY_RADIUS',
+            'KPFM_CAPACITANCE'
+        ]
         from simulation_config_def import PARAMETER_DEFINITIONS
-        for category, params in PARAMETER_DEFINITIONS.items():
-            for key, info in params.items():
-                label = info[0]
-                val = current_config.get(key, info[1])
-                params_lines.append(f"{label}: {val}")
-        params_text = "\n".join(params_lines)
+        params_lines = []
+        for key in tuning_keys:
+            if key in current_config:
+                label = key
+                for cat in PARAMETER_DEFINITIONS.values():
+                    if key in cat:
+                        label = cat[key][0]
+                        break
+                params_lines.append(f"{label}: {current_config[key]}")
+
         stats_text = (
-            f"Max: {v_max:.4f}V\n"
-            f"Min: {v_min:.4f}V\n"
-            f"Range: {abs(v_max-v_min):.4f}V\n"
-            f"------------------\n"
-            f"{params_text}"
+            f"Max: {v_max:.4f}V\nMin(valid): {v_min_valid:.4f}V\n"
+            f"Average(valid): {v_avg:.4f}V\nMedian(valid): {v_med:.4f}V\n"
+            "------------------\n" + "\n".join(params_lines)
         )
         plt.text(-145, -145, stats_text, color='white', fontsize=7,
                 family='monospace', fontweight='bold',
@@ -489,6 +528,16 @@ class ChargingGenerator:
         np.add.at(radial_count, r_rounded[mask], 1)
         radial_avg = np.divide(radial_sum, radial_count, out=np.zeros_like(radial_sum), where=radial_count > 0)
         
+        # 保存徑向分佈的 RawData
+        csv_raw_path = filepath.replace(".png", "_Radial_RawData.csv")
+        try:
+            with open(csv_raw_path, 'w') as f:
+                f.write("Radius(mm),Average Surface Potential(V)\n")
+                for r_val, avg_val in enumerate(radial_avg):
+                    f.write(f"{r_val},{avg_val:.6f}\n")
+        except Exception as e:
+            print(f"Error saving radial raw data: {e}")
+
         plt.figure(figsize=(10, 6), dpi=100)
         plt.plot(np.arange(len(radial_avg)), radial_avg, color='red', linewidth=2, label='Avg Potential')
         plt.fill_between(np.arange(len(radial_avg)), radial_avg, alpha=0.2, color='red')
@@ -498,12 +547,19 @@ class ChargingGenerator:
         plt.xlim(0, max_r)
         plt.grid(True, linestyle='--', alpha=0.7)
 
-        v_max = np.max(radial_avg)
-        v_min = np.min(radial_avg)
-        stats_text = f"Max: {v_max:.4f}V\nMin: {v_min:.4f}V"
-        plt.text(0.02, 0.95, stats_text, transform=plt.gca().transAxes,
+        # 統計看板 (Max, Min, Average, Median)
+        valid_r = radial_avg[np.abs(radial_avg) > 1e-4]
+        r_max = np.max(radial_avg)
+        r_min = np.min(valid_r) if valid_r.size > 0 else 0.0
+        r_avg = np.mean(valid_r) if valid_r.size > 0 else 0.0
+        r_med = np.median(valid_r) if valid_r.size > 0 else 0.0
+
+        stats_text = (
+            f"Max: {r_max:.4f}V\nMin(valid): {r_min:.4f}V\n"
+            f"Average: {r_avg:.4f}V\nMedian: {r_med:.4f}V"
+        )
+        plt.text(0.02, 0.05, stats_text, transform=plt.gca().transAxes,
                 color='red', fontsize=10, family='monospace', fontweight='bold',
-                verticalalignment='top',
                 bbox=dict(facecolor='white', alpha=0.7, edgecolor='red'))
 
         plt.tight_layout()
@@ -528,23 +584,25 @@ class ChargingGenerator:
         abs_max_global = max(abs(v_max_final), abs(v_min_final), 1e-5)
 
         print(f"Exporting Charging Video...")
+
+        # 使用與圖片相同的 'jet' colormap
+        cmap_id = cv2.COLORMAP_JET
+
         for frame_data in video_buffer:
             p_map = self._calculate_potential(frame_data['surface_charge'], config)
             
             # 歸一化到 0-255，且 0V 剛好在中間 (127)
             # (val - (-abs_max)) / (2 * abs_max) * 255
             norm_map = ((p_map.T + abs_max_global) / (2 * abs_max_global) * 255)
-            norm_map = np.clip(norm_map, 0, 255).astype(np.uint8)
+            # 增加亮度：將歸一化後的數值進行稍微的 Gamma 修正或線性縮放
+            # 這裡我們稍微提高基礎亮度
+            norm_map = np.clip(norm_map * 1.1, 0, 255).astype(np.uint8)
             
-            # 使用 seismic_r 對應的 OpenCV 色階 (此處手動模擬或使用 COLORMAP_JET)
-            color_view = cv2.applyColorMap(norm_map, cv2.COLORMAP_JET)
+            # 使用選定的 colormap
+            color_view = cv2.applyColorMap(norm_map, cmap_id)
             color_view = cv2.resize(color_view, (view_size, view_size), interpolation=cv2.INTER_LINEAR)
             color_view = cv2.bitwise_and(color_view, color_view, mask=mask)
             
-            # 加上時間文字
-            cv2.putText(color_view, f"Time: {frame_data['time']:.1f}s", (20, 40), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-
             out.write(color_view)
 
         out.release()
