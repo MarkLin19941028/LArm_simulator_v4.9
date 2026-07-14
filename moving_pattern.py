@@ -20,57 +20,106 @@ class MovingPatternGenerator:
         """
         self.app = app
 
-    def export_nozzle_pattern(self):
-        parsed_recipe = self.app.parse_and_prepare_recipe()
-        if not parsed_recipe: return
+    # 修正後的 export_nozzle_pattern 支援主介面呼叫 & 批次匯出呼叫
+    def export_nozzle_pattern(self, filepath=None, parsed_recipe=None, progress_widgets=None):
+        """
+        導出 Nozzle 軌跡。
+        支援兩種模式：
+        1. 互動模式 (不傳參數)：自動彈出 dialog 詢問存檔路徑，並建立 Toplevel 進度視窗。
+        2. 批次模式 (傳入 filepath 與 parsed_recipe)：直接在背景執行運算，不干擾主執行緒。
+        """
+        is_headless = (filepath is not None)
 
-        user_path = filedialog.asksaveasfilename(
-            defaultextension=".png",
-            filetypes=[("PNG Image", "*.png"), ("All Files", "*.*")],
-            title="Export Moving Pattern Image As..."
-        )
-        if not user_path: return
+        # 1. 準備配方數據
+        if parsed_recipe is None:
+            parsed_recipe = self.app.parse_and_prepare_recipe()
+        if not parsed_recipe: 
+            return
 
-        # 套用命名規範
-        base_path, ext = os.path.splitext(user_path)
+        # 2. 確定存檔路徑
+        if not is_headless:
+            # 互動模式：主動詢問
+            user_path = filedialog.asksaveasfilename(
+                defaultextension=".png",
+                filetypes=[("PNG Image", "*.png"), ("All Files", "*.*")],
+                title="Export Moving Pattern Image As..."
+            )
+            if not user_path: return
+            base_path, ext = os.path.splitext(user_path)
+        else:
+            # 批次模式：使用傳入的路徑
+            base_path = filepath
+            ext = '.png'
+
         if ext.lower() not in ['.png', '.jpg', '.jpeg']:
             ext = '.png'
+
+        # 定義 5 個輸出的關聯檔案路徑
         filepath_img = f"{base_path}_Moving_Pattern{ext}"
         filepath_vid = f"{base_path}_Moving_Pattern.mp4"
         filepath_heatmap = f"{base_path}_Time_Heatmap{ext}"
         filepath_csv = f"{base_path}_Time_Distribution.csv"
         filepath_radial = f"{base_path}_Radial_Distribution{ext}"
 
-        progress_window = tk.Toplevel(self.app.root)
-        progress_window.title("Generating Pattern & Video")
-        progress_window.geometry("400x120")
-        progress_window.transient(self.app.root)
-        progress_window.grab_set()
-        progress_window.resizable(False, False)
-        ttk.Label(progress_window, text="Generating moving pattern image, please wait...", padding=10).pack()
+        # 3. 處理進度條 (Headless 模式下不建立新視窗，而是使用傳入的虛擬 mock 視窗)
+        progress_window = None
+        if not is_headless:
+            # 互動模式：建立 Tkinter Toplevel 進度條
+            progress_window = tk.Toplevel(self.app.root)
+            progress_window.title("Generating Pattern & Video")
+            progress_window.geometry("400x120")
+            progress_window.transient(self.app.root)
+            progress_window.grab_set()
+            progress_window.resizable(False, False)
+            ttk.Label(progress_window, text="Generating moving pattern image, please wait...", padding=10).pack()
 
-        total_duration = sum(p['total_duration'] for p in parsed_recipe['processes'])
-        if total_duration <= 0: total_duration = 1.0
+            total_duration = sum(p['total_duration'] for p in parsed_recipe['processes'])
+            if total_duration <= 0: total_duration = 1.0
 
-        progress_label = ttk.Label(progress_window, text=f"Processing Time: 0.0s / {total_duration:.1f}s (0%)", padding=(0, 5))
-        progress_label.pack()
-        progress_bar = ttk.Progressbar(progress_window, orient="horizontal", length=350, mode="determinate", maximum=total_duration)
-        progress_bar.pack(pady=10)
-        progress_widgets = {'window': progress_window, 'bar': progress_bar, 'label': progress_label}
+            progress_label = ttk.Label(progress_window, text=f"Processing Time: 0.0s / {total_duration:.1f}s (0%)", padding=(0, 5))
+            progress_label.pack()
+            progress_bar = ttk.Progressbar(progress_window, orient="horizontal", length=350, mode="determinate", maximum=total_duration)
+            progress_bar.pack(pady=10)
+            
+            progress_widgets = {
+                'window': progress_window, 
+                'bar': progress_bar, 
+                'label': progress_label
+            }
 
+        # 4. 執行圖表、影片與數據運算
         try:
             try:
+                # 確保在獲取 tkinter 變數時有防錯處理
                 current_multiplier = float(self.app.speed_var.get().replace('x', ''))
             except (AttributeError, ValueError):
                 current_multiplier = 1.0
 
-            self._run_headless_pattern_generation(parsed_recipe, filepath_img, filepath_vid, filepath_heatmap, filepath_csv, filepath_radial, progress_widgets, play_speed_multiplier=current_multiplier)
-            # messagebox.showinfo("Success", f"Moving Pattern, Heatmap, Radial Graph and CSV exported successfully to:\n{filepath_img}\n{filepath_vid}\n{filepath_heatmap}\n{filepath_radial}\n{filepath_csv}")
-            print(f"Moving Pattern, Heatmap, Radial Graph and CSV exported successfully to:\n{filepath_img}\n{filepath_vid}\n{filepath_heatmap}\n{filepath_radial}\n{filepath_csv}")
+            # 呼叫核心運算引擎
+            self._run_headless_pattern_generation(
+                parsed_recipe, 
+                filepath_img, 
+                filepath_vid, 
+                filepath_heatmap, 
+                filepath_csv, 
+                filepath_radial, 
+                progress_widgets, 
+                play_speed_multiplier=current_multiplier
+            )
+            
+            if not is_headless:
+                print("Success", f"Moving Pattern, Heatmap, Radial Graph and CSV exported successfully!")
+            else:
+                print(f"[Batch Pattern Success] Generated targets for: {os.path.basename(base_path)}")
+
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to generate pattern and video: {e}")
+            if not is_headless:
+                messagebox.showerror("Error", f"Failed to generate pattern and video: {e}")
+            else:
+                raise e # 批次模式下往上拋，讓批次視窗的 log 抓到錯誤
         finally:
-            if progress_window.winfo_exists():
+            # 釋放與銷毀 GUI
+            if progress_window and progress_window.winfo_exists():
                 progress_window.destroy()
 
     def _run_headless_pattern_generation(self, recipe, filepath_img, filepath_vid, filepath_heatmap, filepath_csv, filepath_radial, progress_widgets=None, play_speed_multiplier=1.0):
@@ -280,9 +329,13 @@ class MovingPatternGenerator:
         ax_heat.set_ylabel("Y (mm)", color='white')
         ax_heat.tick_params(colors='white')
         
+        from matplotlib.ticker import FormatStrFormatter # 💡 請在該區塊內或檔案頂端引入
+
         cbar = fig_heat.colorbar(im, ax=ax_heat, fraction=0.046, pad=0.04)
-        cbar.ax.yaxis.set_tick_params(color='white')
-        cbar.ax.set_yticklabels([f"{x:.2f}" for x in cbar.get_ticks()], color='white')
+        # 同步設定 tick 線的顏色與文字標籤的顏色為白色
+        cbar.ax.yaxis.set_tick_params(color='white', labelcolor='white')
+        # 💡 使用 Formatter 安全格式化小數點後兩位，完全避免 UserWarning
+        cbar.ax.yaxis.set_major_formatter(FormatStrFormatter('%.2f'))
         cbar.set_label("Time (s)", color='white')
         
         fig_heat.savefig(filepath_heatmap, bbox_inches='tight', dpi=100, facecolor=fig_heat.get_facecolor())

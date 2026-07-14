@@ -1,6 +1,11 @@
 import numpy as np
 import math
 import os
+import threading
+# --- 新增這兩行：強制 Matplotlib 在背景執行緒中使用無 GUI 的 Agg 後端 ---
+import matplotlib
+matplotlib.use('Agg')
+
 import matplotlib.pyplot as plt
 import tkinter as tk
 from tkinter import messagebox
@@ -17,7 +22,7 @@ from constants import (
 @jit(nopython=True, cache=True, fastmath=True)
 def fast_accumulate(coords, heatmap, dt, grid_size, range_min, range_max):
     """
-    使用 Numba JIT 編譯的極速累積函數。
+    使用 Numba JIT 編編譯的極速累積函數。
     一次完成：邊界檢查 -> 網格索引計算 -> 累加
     (座標系已由引擎處理為旋轉座標系，此處不再進行旋轉)
     """
@@ -166,7 +171,6 @@ class AccuHeatmapGenerator:
         radial_png_path = f"{real_base}_Accumulation_Radial_Distribution.png"
 
         # 轉置矩陣以符合視覺慣例 (通常 histogram2d 的 x,y 與影像的 row,col 是轉置關係)
-        # 這裡與原程式碼邏輯保持一致
         data = heatmap_matrix.T 
         
         grid_dim = int(np.sqrt(data.size))
@@ -204,9 +208,57 @@ class AccuHeatmapGenerator:
             print(f"Error saving image: {e}")
         plt.close()
 
+        # 1. 計算 radial distribution (bin size = 1mm)
+        radial_bin_size = 1.0
+        grid_size = heatmap_matrix.shape[0]
+        center = grid_size / 2.0  # 對應 300 格的中心為 150
+        
+        # 建立與 heatmap 尺寸相同的網格物理坐標
+        # 每格 1mm 寬度，在範圍 -150mm 到 150mm 內
+        y_indices, x_indices = np.indices(heatmap_matrix.shape)
+        # x_coords & y_coords 分別代表物理座標，中心 (150, 150) 為 (0, 0)
+        x_phys = -150.0 + (x_indices + 0.5) * 1.0
+        y_phys = -150.0 + (y_indices + 0.5) * 1.0
+        r_dist = np.sqrt(x_phys**2 + y_phys**2)
+        
+        max_r = float(WAFER_RADIUS)  # 150.0 mm
+        max_bin = int(max_r // radial_bin_size)  # 150 
+        
+        radial_sum = np.zeros(max_bin + 1)
+        radial_count = np.zeros(max_bin + 1)
+        
+        r_binned = (r_dist // radial_bin_size).astype(int)
+        mask = r_dist <= max_r
+        
+        np.add.at(radial_sum, r_binned[mask], heatmap_matrix[mask])
+        np.add.at(radial_count, r_binned[mask], 1)
+        
+        radial_avg = np.divide(radial_sum, radial_count, out=np.zeros_like(radial_sum), where=radial_count > 0)
+        bin_centers = np.arange(max_bin + 1) * radial_bin_size + (radial_bin_size / 2.0)
+
+        # 2. 寫入 CSV：上方包含徑向數據、下方包含 2D 二維數據
         try:
-            np.savetxt(heatmap_csv_path, data, delimiter=",", fmt='%.6f', 
-                       header="Raw Accumulation Data (Seconds), Resolution: 1.0mm/pixel, Range: -150 to 150 mm")
+            with open(heatmap_csv_path, 'w', encoding='utf-8') as f:
+                # 寫入 meta metadata 資訊
+                f.write("# =========================================================================\n")
+                f.write("# Radial Distribution Data (Bin Size: 1.0mm)\n")
+                f.write("# =========================================================================\n")
+                f.write("Radius(mm),Average Accumulation Time(s)\n")
+                # 寫入每 1mm 寬度對應的累積時間平均值
+                for r_center, val in zip(bin_centers, radial_avg):
+                    f.write(f"{r_center:.1f},{val:.6f}\n")
+                
+                f.write("\n") # 留白一行空行做為分隔
+                
+                f.write("# =========================================================================\n")
+                f.write("# Raw 2D Accumulation Heatmap Matrix (300x300, Resolution: 1.0mm/pixel)\n")
+                f.write("# Row corresponds to Y-axis [-150 to 150mm], Column to X-axis [-150 to 150mm]\n")
+                f.write("# =========================================================================\n")
+                
+                # 寫入 2D 矩陣數據
+                np.savetxt(f, data, delimiter=",", fmt='%.6f')
+                
+            print(f"Successfully saved combined raw data to {heatmap_csv_path}")
         except Exception as e:
             print(f"Failed to write heatmap raw data to CSV: {e}")
         

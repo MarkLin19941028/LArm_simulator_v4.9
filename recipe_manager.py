@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import messagebox, filedialog
 import os
+import csv
 from simulation_config_def import get_default_config
 
 class RecipeManager:
@@ -11,21 +12,15 @@ class RecipeManager:
         # 儲存 SimulationApp 的實例，以便存取 UI 變數和方法
         self.app = app_instance
 
-    def export_recipe(self):
+    def export_recipe(self, filepath):
         """
         將當前的全域參數和 Process 參數匯出為 .csv Recipe 檔案。
+        必須由外部傳入完整的儲存路徑 (filepath)。
         """
+        if not filepath:
+            return
+
         try:
-            filepath = filedialog.asksaveasfilename(
-                defaultextension=".csv",
-                filetypes=[("CSV Recipe Files", "*.csv"), ("All Files", "*.*")],
-                title="Export Recipe As..."
-            )
-            if not filepath:
-                return
-
-            import csv
-
             with open(filepath, 'w', encoding='utf-8-sig', newline='') as f:
                 writer = csv.writer(f)
                 
@@ -109,20 +104,16 @@ class RecipeManager:
                 continue
         raise UnicodeDecodeError(f"Failed to decode file {filepath} with any of {encodings}")
 
-    def import_recipe(self):
+    def import_recipe(self, filepath):
         """
         從 .csv (或舊版 .txt) 檔案匯入 Recipe，並更新 SimulationApp 的 UI 變數。
+        必須由外部傳入完整的讀取路徑 (filepath)。
         """
-        try:
-            filepath = filedialog.askopenfilename(
-                filetypes=[("Recipe Files", "*.csv *.txt"), ("CSV Files", "*.csv"), ("Text Files", "*.txt"), ("All Files", "*.*")],
-                title="Import Recipe"
-            )
-            if not filepath:
-                return
+        if not filepath:
+            return
 
+        try:
             global_params, imported_processes, current_process_dict = {}, [], None
-            
             imported_tuning_params = {}
             if filepath.endswith(".csv"):
                 import csv
@@ -224,10 +215,12 @@ class RecipeManager:
             for proc_data in imported_processes:
                 proc_data['steps'] = int(proc_data.get('steps', 3))
             
-            self.app.is_importing = True # 設置標記防止重複初始化
-            self.app.num_processes.set(num_proc)
-            self.app.recreate_process_widgets(imported_data=imported_processes) # 重新創建 UI
-            self.app.is_importing = False
+            try:
+                self.app.is_importing = True # 設置標記防止重複初始化
+                self.app.num_processes.set(num_proc)
+                self.app.recreate_process_widgets(imported_data=imported_processes) # 重新創建 UI
+            finally:
+                self.app.is_importing = False
             
             # 填充 Process UI 變數
             for i, proc_data in enumerate(imported_processes):

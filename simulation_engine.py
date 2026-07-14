@@ -604,16 +604,48 @@ class SimulationEngine:
         next_p = self.recipe['processes'][next_idx]
         self.current_process_index = next_idx
 
+        # 判斷是否為相同的 Arm
         if prev_p['arm_id'] == next_p['arm_id'] and prev_p['arm_id'] != 0:
             self.transition_start_time = curr_time
             self.transition_start_angle = current_angle
+            
             if next_p.get('start_from_center'):
                 self.animation_state = STATE_MOVING_TO_CENTER_ARC
                 self.transition_end_angle = arm.coords_to_angle(arm.center_pos_coords)
             else:
                 self.animation_state = STATE_ARM_MOVE_FROM_HOME
-                target_pos = next_p['steps'][0]['pos'] if next_p.get('steps') else 0
-                self.transition_end_angle = arm.percent_to_angle(target_pos)
+                
+                # --- [新增邏輯] 尋找與當前位置最接近的 step ---
+                next_steps = next_p.get('steps', [])
+                if next_steps:
+                    min_diff = float('inf')
+                    closest_idx = 0
+                    
+                    # 比較當前角度與所有目標 step 的角度，找出距離最短的
+                    for idx, step in enumerate(next_steps):
+                        target_angle = arm.percent_to_angle(step['pos'])
+                        diff = abs(arm._get_angle_diff(target_angle, current_angle))
+                        if diff < min_diff:
+                            min_diff = diff
+                            closest_idx = idx
+                            
+                    # 設定移動終點為最近的 step
+                    target_pos = next_steps[closest_idx]['pos']
+                    self.transition_end_angle = arm.percent_to_angle(target_pos)
+                    
+                    # 計算累積的 physics time，讓物理引擎直接從該 step 繼續執行
+                    start_time_offset = 0.0
+                    f_segs = next_p.get('physics_segments', [])
+                    for m in range(min(closest_idx, len(next_steps) - 1)):
+                        if m < len(f_segs):
+                            start_time_offset += f_segs[m]['t']
+                            
+                    # 紀錄動態起始時間，供 transition 完成時提取
+                    next_p['dynamic_start_time'] = start_time_offset
+                else:
+                    self.transition_end_angle = arm.percent_to_angle(0)
+                    next_p['dynamic_start_time'] = 0.0
+                # -----------------------------------------------
         else:
             if prev_p['arm_id'] != 0 and arm:
                 self.animation_state = STATE_ARM_MOVE_TO_HOME
@@ -649,7 +681,9 @@ class SimulationEngine:
                     self.animation_state, self.transition_start_time = STATE_MOVING_TO_CENTER_ARC, self.simulation_time_elapsed
                     self.transition_start_angle, self.transition_end_angle = arm.coords_to_angle(self.last_nozzle_pos), arm.coords_to_angle(arm.center_pos_coords)
                 else:
-                    self.animation_state, self.time_offset_for_current_process, self.cumulative_physics_time = STATE_RUNNING_PROCESS, self.simulation_time_elapsed, 0.0
+                    # --- [修改邏輯] 替換原本的 0.0，載入剛剛計算的 dynamic_start_time ---
+                    # 若為不同手臂 (無 dynamic_start_time 屬性)，.get 會自動 fallback 回 0.0，從 step 1 開始。
+                    self.animation_state, self.time_offset_for_current_process, self.cumulative_physics_time = STATE_RUNNING_PROCESS, self.simulation_time_elapsed, current_process.get('dynamic_start_time', 0.0)
             elif self.animation_state == STATE_MOVING_TO_CENTER_ARC:
                 self.animation_state, self.transition_start_time = STATE_PAUSE_AT_CENTER, self.simulation_time_elapsed
             elif self.animation_state == STATE_MOVING_FROM_CENTER_TO_START:
@@ -657,7 +691,7 @@ class SimulationEngine:
         else:
             frac = t / dur
             self.last_nozzle_pos = arm.get_interpolated_coords(self.transition_start_angle, self.transition_end_angle, frac)
-
+            
     def _prepare_next_arm_move(self):
         next_p = self.recipe['processes'][self.current_process_index]
         self.active_arm_id = next_p['arm_id']
