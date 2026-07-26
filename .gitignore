@@ -1,0 +1,14 @@
+# 虛擬環境 (絕對不要上傳)
+venv/
+.venv/
+env/
+
+# Python 自動生成的暫存檔與快取
+__pycache__/
+*.pyc
+
+# Mac 系統隱藏檔
+.DS_Store
+
+# 敏感金鑰檔
+.env
